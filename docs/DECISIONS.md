@@ -38,7 +38,18 @@
 - ピント検証は 512px グレースケール上のラプラシアン比（`FOCUS_VERIFY_K=1.15`）。
 - ネイティブでのレンズ位置直接指定は行わない（将来案として 03 に記載のとおり）。
 - 撮影順序は **FAR（背景）→ NEAR（ぬい）**。最後に背景点をタップした状態でシャッターを押す操作と一致させる（`photoA`=FAR, `photoB`=NEAR）。
+- ピント検証は診断の画質比較と同じ **長辺512px・領域15%・ラプラシアン分散**（`FOCUS_VERIFY_LONG_SIDE`）。Vision Camera の `left`/`right` は `orientationToDegrees` で回転し、座標の x/y 入替えは行わない（画像を上向きにしてからプレビューと同じ正規化座標を使う）。
 
 ## マスクぼかし
 
 - 作業解像度のマスクに Skia `ImageFilter.MakeBlur` を適用（シェーダー内ループではなくオフスクリーン描画）。速度は実機で要計測。
+
+## マスク生成（正規化差）
+
+- 判定は正規化差 `d = (sN - sF) / (sN + sF + eps)`（-1〜1）。`threshold`（既定 0.15）・`nearBias`（既定 0.02）・`haloShrink` はすべて d の単位。
+- `sharpWindowRadius`（既定 6）は作業解像度での窓の半径 px。ガウスの sigma には `半径/√3` で換算する（`windowRadiusToSigma`）。`maskBlurRadius` は従来どおり sigma として扱う。
+- 鮮鋭度マップは 8bit のため `sqrt(lap / SHARPNESS_LAP_MAX)` で格納し、マスク側で 2 乗して戻す。窓平均は符号化後の値に掛かるため、厳密な平均より疎なエッジの寄与がやや小さい。
+- 低テクスチャ（`sN + sF` が `MASK_LOW_TEXTURE_LO`〜`HI` 未満）は、確からしさで重み付けしたマスクを半径 `MASK_FILL_BLUR_RADIUS`（32px）でぼかした値で補う。周囲にもテクスチャが無ければ FAR（0）に寄せる。
+- `MASK_EPS`・`MASK_LOW_TEXTURE_LO/HI` は実機未計測の見積もり値。診断レポートの「鮮鋭度マップ・正規化差」の値域を見て調整する。
+- 修正前のラプラシアンは隣接画素を `1/幅` px 先で参照しており（座標はピクセル単位）、出力が最大でも 1/255 だった。旧マスクは `max(sN, sF) < 0.01` で 0.5 を返すため、全画素が 0.5 になっていた。隣接参照は ±1px に修正済み。
+- 式の CPU 実装は `src/fusion/maskCore.ts`（シェーダーと同じ式、単体テストあり）。

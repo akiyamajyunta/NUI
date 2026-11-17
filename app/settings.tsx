@@ -10,6 +10,7 @@ import { useAppState } from '@/state/AppState';
 const STRATEGIES: CaptureStrategyId[] = ['S1', 'S2', 'S3'];
 const RESOLUTIONS: PhotoResolutionPreset[] = ['HD_4_3', 'FHD_4_3', 'UHD_4_3'];
 const S3_DELAYS: CaptureSettings['s3ExtraDelayMs'][] = [0, 50, 100, 200];
+const FOCUS_SETTLES: CaptureSettings['focusSettleMs'][] = [0, 100, 200, 300];
 
 export default function SettingsScreen() {
   const { state, dispatch } = useAppState();
@@ -50,12 +51,32 @@ export default function SettingsScreen() {
           value={s.autoFuseAfterCapture}
           onChange={(v) => patch({ autoFuseAfterCapture: v })}
         />
+        <PickerRow
+          label="フォーカス後の待ち (ms)"
+          value={String(s.focusSettleMs)}
+          onPress={() => patch({ focusSettleMs: cycle(FOCUS_SETTLES, s.focusSettleMs) })}
+        />
         <Row
-          label="1枚目（背景）前に再フォーカス"
+          label="撮影1前に必ずフォーカス"
           value={s.refocusBeforeFirst}
           onChange={(v) => patch({ refocusBeforeFirst: v })}
         />
+        <Row
+          label="ピント維持（背景点・実験）"
+          value={s.holdBackgroundFocus}
+          onChange={(v) => patch({ holdBackgroundFocus: v })}
+        />
+        <Row
+          label="閉ループ撮影（1回再撮・試作）"
+          value={s.closedLoopCapture}
+          onChange={(v) => patch({ closedLoopCapture: v })}
+        />
         <Row label="元画像を保持" value={s.saveOriginals} onChange={(v) => patch({ saveOriginals: v })} />
+        <Row
+          label="撮影後、診断を自動でコピー"
+          value={s.autoCopyDiagnosticsAfterFusion}
+          onChange={(v) => patch({ autoCopyDiagnosticsAfterFusion: v })}
+        />
         <Text style={styles.note}>
           S1=順次フォーカス / S2=スナップショットピント / S3=固定遅延。ベンチマークはホームから。
         </Text>

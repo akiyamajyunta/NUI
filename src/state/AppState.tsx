@@ -1,13 +1,25 @@
 import React, { createContext, useContext, useMemo, useReducer } from 'react';
 import { DEFAULT_CAPTURE_SETTINGS, DEFAULT_FUSION_PARAMS } from '@/config/constants';
 import type { CaptureSettings } from '@/config/constants';
-import type { CaptureResult, FusionParams, FusionTimings, SyntheticSession } from '@/types';
+import type {
+  CaptureResult,
+  FusionParams,
+  FusionTimings,
+  NormalizedPoint,
+  SyntheticSession,
+} from '@/types';
 import type { FocusVerifyResult } from '@/perf/focusVerify';
 
 type FusionSource = {
   nearUri: string;
   farUri: string;
   from: 'import' | 'capture';
+  nearPoint?: NormalizedPoint;
+  farPoint?: NormalizedPoint;
+  captureWidth?: number;
+  captureHeight?: number;
+  nearOrientation?: string;
+  farOrientation?: string;
 };
 
 type State = {

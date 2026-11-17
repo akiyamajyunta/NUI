@@ -1,7 +1,6 @@
 import type { CameraRef, FocusOptions } from 'react-native-vision-camera';
-import { FOCUS_SETTLE_MS } from '@/config/constants';
 
-const CAPTURE_FOCUS_OPTIONS: FocusOptions = {
+export const CAPTURE_FOCUS_OPTIONS: FocusOptions = {
   responsiveness: 'snappy',
   adaptiveness: 'locked',
   modes: ['AF'],
@@ -20,16 +19,17 @@ export async function withTimeout<T>(promise: Promise<T>, ms: number, label: str
   }
 }
 
-/** タップ焦点を合わせ、レンズ安定の短い待ちを入れる */
+/** タップ焦点を合わせ、設定した待ち時間を入れる */
 export async function focusThenSettle(
   camera: CameraRef,
   view: { x: number; y: number },
   timeoutMs: number,
   label: string,
+  settleMs = 0,
 ): Promise<void> {
   await withTimeout(camera.focusTo(view, CAPTURE_FOCUS_OPTIONS), timeoutMs, label);
-  if (FOCUS_SETTLE_MS > 0) {
-    await new Promise((r) => setTimeout(r, FOCUS_SETTLE_MS));
+  if (settleMs > 0) {
+    await new Promise((r) => setTimeout(r, settleMs));
   }
 }
 

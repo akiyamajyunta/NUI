@@ -1,3 +1,4 @@
+import { maybeFocusFarBeforeShot1 } from '@/camera/focusBeforeShotA';
 import { focusThenSettle } from '@/camera/focusMetering';
 import { normalizedToView } from '@/camera/focusPoints';
 import { captureSnapshotToUri } from '@/camera/snapshotToUri';
@@ -7,27 +8,22 @@ export const snapshotFocusStrategy: CaptureStrategy = {
   id: 'S2',
   label: 'スナップショット (S2)',
   async run(ctx) {
+    const settle = ctx.settings.focusSettleMs;
     const nearView = normalizedToView(ctx.nearPoint, ctx.previewWidth, ctx.previewHeight);
-    const farView = normalizedToView(ctx.farPoint, ctx.previewWidth, ctx.previewHeight);
-
-    if (ctx.settings.refocusBeforeFirst || ctx.focusedOnNear) {
-      ctx.mark('focusA_start');
-      await focusThenSettle(ctx.camera, farView, ctx.settings.focusTimeoutMs, 'far');
-      ctx.mark('focusA_end');
-    }
+    const focusABeforeShot = await maybeFocusFarBeforeShot1(ctx);
 
     ctx.mark('photoA_start');
     const far = await captureSnapshotToUri(ctx.camera, ctx.farPoint, 'FAR');
     ctx.mark('photoA_end');
 
     ctx.mark('focusB_start');
-    await focusThenSettle(ctx.camera, nearView, ctx.settings.focusTimeoutMs, 'near');
+    await focusThenSettle(ctx.camera, nearView, ctx.settings.focusTimeoutMs, 'near', settle);
     ctx.mark('focusB_end');
 
     ctx.mark('photoB_start');
     const near = await captureSnapshotToUri(ctx.camera, ctx.nearPoint, 'NEAR');
     ctx.mark('photoB_end');
 
-    return { near, far };
+    return { near, far, focusABeforeShot };
   },
 };

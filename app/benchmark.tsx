@@ -21,13 +21,10 @@ import {
   BENCHMARK_RUNS_DEFAULT,
 } from '@/config/constants';
 import { resolutionForPreset, resolutionLabel } from '@/config/photoResolution';
-import { fitLongSide } from '@/imaging/downscale';
-import { loadImage } from '@/imaging/loadImage';
-import { readGrayFromSkImage } from '@/imaging/imagePixels';
 import type { CaptureSegmentTimings } from '@/perf/timelineSegments';
 import { captureSegments } from '@/perf/timelineSegments';
+import { runFocusAnalysis } from '@/perf/focusAnalysis';
 import type { FocusVerifyResult } from '@/perf/focusVerify';
-import { verifyFocusFromGray } from '@/perf/focusVerify';
 import { computeStats } from '@/perf/stats';
 import { useAppState } from '@/state/AppState';
 import { FocusMarker } from '@/ui/FocusMarker';
@@ -45,8 +42,10 @@ type RunRow = {
 
 type PointMode = 'subject' | 'background';
 
-function segCell(v?: number): string {
-  return v != null ? `${Math.round(v)}` : '—';
+function segCell(v?: number | { executed: boolean; ms?: number }): string {
+  if (v == null) return '—';
+  if (typeof v === 'number') return `${Math.round(v)}`;
+  return v.executed ? `${Math.round(v.ms ?? 0)}` : 'skip';
 }
 
 function focusOkRate(runs: RunRow[]): number {
@@ -162,14 +161,17 @@ export default function BenchmarkScreen() {
         previewWidth: previewW,
         previewHeight,
         focusedOnNear: lensOnNear,
+        focusSession: { lastTarget: 'background', lastAtMs: Date.now() },
       });
       lensOnNear = true;
-      const near = await loadImage(result.near.uri);
-      const far = await loadImage(result.far.uri);
-      const { width: w, height: h } = fitLongSide(near.width, near.height, 512);
-      const gn = readGrayFromSkImage(near.image, 512);
-      const gf = readGrayFromSkImage(far.image, 512);
-      const fv = verifyFocusFromGray(gn, gf, w, h, nearPoint, farPoint);
+      const { verify: fv } = await runFocusAnalysis({
+        nearUri: result.near.uri,
+        farUri: result.far.uri,
+        nearOrientation: result.near.orientation,
+        farOrientation: result.far.orientation,
+        nearPoint,
+        farPoint,
+      });
       out.push({
         totalMs: result.totalMs,
         focusVerify: fv,

@@ -1,5 +1,11 @@
-import { Skia, type SkImage } from '@shopify/react-native-skia';
-import type { FusionParams, FusionResult } from '@/types';
+import {
+  AlphaType,
+  ColorType,
+  Skia,
+  type SkImage,
+  type SkShader,
+} from '@shopify/react-native-skia';
+import type { FusionParams, FusionResult, MaskDiagnostics } from '@/types';
 import { loadImage } from '@/imaging/loadImage';
 import { fitLongSide, resizeSkImage, imageShaderBilinear } from '@/imaging/downscale';
 import { encodeToCacheJpeg } from '@/imaging/saveImage';
@@ -7,10 +13,21 @@ import { colorCorrectionFromMeans, IDENTITY_COLOR } from '@/imaging/colorStats';
 import { readRgbMeans, readGrayFromSkImage } from '@/imaging/imagePixels';
 import { computePsnr } from '@/perf/psnr';
 import { alignNearFar } from '@/fusion/align';
-import { buildSharpnessMap, blurSingleChannel } from '@/fusion/sharpness';
-import { MASK_SKSL } from '@/fusion/shaders/mask';
+import { buildSharpnessMap, blurSingleChannel, windowRadiusToSigma } from '@/fusion/sharpness';
+import { effectiveThreshold, maskDiagnosticsFromEncoded } from '@/fusion/maskCore';
+import { MASK_FILL_SKSL, MASK_RAW_SKSL } from '@/fusion/shaders/mask';
 import { BLEND_SKSL } from '@/fusion/shaders/blend';
-import { MAX_TEXTURE_LONG_SIDE } from '@/config/constants';
+import {
+  MASK_EPS,
+  MASK_FILL_BLUR_RADIUS,
+  MASK_FILL_FALLBACK,
+  MASK_FILL_PRIOR,
+  MASK_LOW_TEXTURE_HI,
+  MASK_LOW_TEXTURE_LO,
+  ALIGN_MIN_CONFIDENCE,
+  MAX_TEXTURE_LONG_SIDE,
+  SHARPNESS_LAP_MAX,
+} from '@/config/constants';
 import { logError } from '@/util/log';
 
 export type FuseProgress = (stage: string) => void;
@@ -19,28 +36,90 @@ export type FuseOptions = {
   manualMask?: import('@shopify/react-native-skia').SkImage;
   referenceUriForPsnr?: string;
   saveDebug?: boolean;
+  /** 診断: 全画素で NEAR または FAR のみを選択 */
+  forceMask?: 'near' | 'far';
 };
+
+function makeUniformMask(w: number, h: number, value: number): SkImage {
+  const surface = Skia.Surface.MakeOffscreen(w, h);
+  if (!surface) throw new Error('uniform mask surface failed');
+  const canvas = surface.getCanvas();
+  const paint = Skia.Paint();
+  paint.setColor(value >= 0.5 ? Skia.Color('#FFFFFF') : Skia.Color('#000000'));
+  canvas.drawRect(Skia.XYWHRect(0, 0, w, h), paint);
+  const img = surface.makeImageSnapshot();
+  surface.dispose();
+  return img;
+}
+
+function drawShaderToImage(shader: SkShader, w: number, h: number): SkImage {
+  const surface = Skia.Surface.MakeOffscreen(w, h);
+  if (!surface) throw new Error('mask surface failed');
+  const paint = Skia.Paint();
+  paint.setShader(shader);
+  surface.getCanvas().drawPaint(paint);
+  const out = surface.makeImageSnapshot();
+  surface.dispose();
+  return out;
+}
+
+/** 診断用: 鮮鋭度マップ S_near・S_far と正規化差 d の値域 */
+function readMaskDiagnostics(sharpNear: SkImage, sharpFar: SkImage): MaskDiagnostics | undefined {
+  const w = sharpNear.width();
+  const h = sharpNear.height();
+  const info = {
+    width: w,
+    height: h,
+    colorType: ColorType.RGBA_8888,
+    alphaType: AlphaType.Unpremul,
+  };
+  const nearBytes = sharpNear.readPixels(0, 0, info);
+  const farBytes = sharpFar.readPixels(0, 0, info);
+  if (!nearBytes || !farBytes) return undefined;
+  return maskDiagnosticsFromEncoded(nearBytes, farBytes, w * h, 4);
+}
 
 function renderMask(
   sharpNear: SkImage,
   sharpFar: SkImage,
   params: FusionParams,
 ): SkImage {
-  const effect = Skia.RuntimeEffect.Make(MASK_SKSL);
-  if (!effect) throw new Error('mask SkSL compile failed');
   const w = sharpNear.width();
   const h = sharpNear.height();
-  const shader = effect.makeShaderWithChildren(
-    [params.threshold, params.nearBias, params.haloShrink],
-    [imageShaderBilinear(sharpNear, w, h), imageShaderBilinear(sharpFar, w, h)],
+
+  // パス1: 正規化差による判定 m0 と、テクスチャの確からしさ c
+  const rawEffect = Skia.RuntimeEffect.Make(MASK_RAW_SKSL);
+  if (!rawEffect) throw new Error('mask SkSL compile failed');
+  const raw = drawShaderToImage(
+    rawEffect.makeShaderWithChildren(
+      [
+        effectiveThreshold(params.threshold),
+        params.nearBias,
+        params.haloShrink,
+        MASK_EPS,
+        MASK_LOW_TEXTURE_LO,
+        MASK_LOW_TEXTURE_HI,
+        SHARPNESS_LAP_MAX,
+      ],
+      [imageShaderBilinear(sharpNear, w, h), imageShaderBilinear(sharpFar, w, h)],
+    ),
+    w,
+    h,
   );
-  const surface = Skia.Surface.MakeOffscreen(w, h);
-  if (!surface) throw new Error('mask surface failed');
-  const paint = Skia.Paint();
-  paint.setShader(shader);
-  surface.getCanvas().drawPaint(paint);
-  let mask = surface.makeImageSnapshot();
-  surface.dispose();
+
+  // パス2: 低テクスチャ領域を、広い半径でぼかした値で補う
+  const wide = blurSingleChannel(raw, windowRadiusToSigma(MASK_FILL_BLUR_RADIUS));
+  const fillEffect = Skia.RuntimeEffect.Make(MASK_FILL_SKSL);
+  if (!fillEffect) throw new Error('mask fill SkSL compile failed');
+  let mask = drawShaderToImage(
+    fillEffect.makeShaderWithChildren(
+      [MASK_FILL_PRIOR, MASK_FILL_FALLBACK],
+      [imageShaderBilinear(raw, w, h), imageShaderBilinear(wide, w, h)],
+    ),
+    w,
+    h,
+  );
+
   if (params.maskBlurRadius > 0) {
     mask = blurSingleChannel(mask, params.maskBlurRadius);
   }
@@ -132,6 +211,8 @@ export async function fuse(
   }
 
   let alignOffset = { dx: 0, dy: 0 };
+  let alignEstimatedOffset = { dx: 0, dy: 0 };
+  let alignOffsetApplied = false;
   let alignConfidence = 1;
   let alignWarning = false;
   if (params.align) {
@@ -139,9 +220,13 @@ export async function fuse(
     const tAlign = performance.now();
     const ar = await alignNearFar(nearImg, farImg);
     alignMs = performance.now() - tAlign;
-    alignOffset = { dx: ar.dx, dy: ar.dy };
+    alignEstimatedOffset = { dx: ar.dx, dy: ar.dy };
     alignConfidence = ar.confidence;
     alignWarning = ar.warned;
+    if (ar.confidence >= ALIGN_MIN_CONFIDENCE) {
+      alignOffset = alignEstimatedOffset;
+      alignOffsetApplied = true;
+    }
   }
 
   const work = fitLongSide(outW, outH, params.workLongSide);
@@ -150,17 +235,29 @@ export async function fuse(
 
   onProgress?.('鮮鋭度');
   const tSharp = performance.now();
-  const sNear = buildSharpnessMap(nearWork, params.sharpWindowRadius);
-  const sFar = buildSharpnessMap(farWork, params.sharpWindowRadius);
-  let mask = options?.manualMask
-    ? resizeSkImage(
-        options.manualMask,
-        nearWork.width(),
-        nearWork.height(),
-      )
-    : renderMask(sNear, sFar, params);
-  if (params.maskBlurRadius > 0 && options?.manualMask) {
-    mask = blurSingleChannel(mask, params.maskBlurRadius);
+  const workW = nearWork.width();
+  const workH = nearWork.height();
+  let sNear: SkImage | undefined;
+  let sFar: SkImage | undefined;
+  let mask: SkImage;
+  if (options?.forceMask) {
+    const v = options.forceMask === 'near' ? 1 : 0;
+    mask = makeUniformMask(workW, workH, v);
+    if (options.saveDebug) {
+      sNear = buildSharpnessMap(nearWork, params.sharpWindowRadius);
+      sFar = buildSharpnessMap(farWork, params.sharpWindowRadius);
+    }
+  } else if (options?.manualMask) {
+    sNear = buildSharpnessMap(nearWork, params.sharpWindowRadius);
+    sFar = buildSharpnessMap(farWork, params.sharpWindowRadius);
+    mask = resizeSkImage(options.manualMask, workW, workH);
+    if (params.maskBlurRadius > 0) {
+      mask = blurSingleChannel(mask, params.maskBlurRadius);
+    }
+  } else {
+    sNear = buildSharpnessMap(nearWork, params.sharpWindowRadius);
+    sFar = buildSharpnessMap(farWork, params.sharpWindowRadius);
+    mask = renderMask(sNear, sFar, params);
   }
   sharpnessMs = performance.now() - tSharp;
 
@@ -194,10 +291,19 @@ export async function fuse(
         nearUri: await encodeToCacheJpeg(nearImg, 'dbg-near'),
         farUri: await encodeToCacheJpeg(farImg, 'dbg-far'),
         maskUri: await encodeToCacheJpeg(mask, 'dbg-mask'),
-        sharpNearUri: await encodeToCacheJpeg(sNear, 'dbg-sn'),
-        sharpFarUri: await encodeToCacheJpeg(sFar, 'dbg-sf'),
+        sharpNearUri: sNear ? await encodeToCacheJpeg(sNear, 'dbg-sn') : undefined,
+        sharpFarUri: sFar ? await encodeToCacheJpeg(sFar, 'dbg-sf') : undefined,
       }
     : undefined;
+
+  let maskDiagnostics: MaskDiagnostics | undefined;
+  if (options?.saveDebug && sNear && sFar) {
+    try {
+      maskDiagnostics = readMaskDiagnostics(sNear, sFar);
+    } catch (e) {
+      logError('fusion', 'mask diagnostics failed', e);
+    }
+  }
 
   let psnrDb: number | undefined;
   if (options?.referenceUriForPsnr) {
@@ -217,9 +323,12 @@ export async function fuse(
     height: outH,
     timings: { loadMs, alignMs, sharpnessMs, blendMs, encodeMs, totalMs },
     alignOffset,
+    alignEstimatedOffset,
+    alignOffsetApplied,
     alignConfidence,
     alignWarning,
     debug,
+    maskDiagnostics,
     psnrDb,
   };
 }

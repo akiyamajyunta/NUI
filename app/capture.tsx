@@ -1,5 +1,5 @@
 import { router, Stack, useIsFocused } from 'expo-router';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Linking,
   Pressable,
@@ -10,15 +10,17 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Camera, usePhotoOutput, type CameraRef } from 'react-native-vision-camera';
-import { mapCaptureError } from '@/camera/focusMetering';
+import { CAPTURE_FOCUS_OPTIONS, mapCaptureError } from '@/camera/focusMetering';
+import type { FocusTarget } from '@/camera/smartFocusBeforeShot';
 import { runCaptureSequence } from '@/camera/captureSequence';
 import { normalizedToView, viewToNormalized } from '@/camera/focusPoints';
 import { useCameraSetup } from '@/camera/useCameraSetup';
+import {
+  HOLD_BACKGROUND_FOCUS_INTERVAL_MS,
+  HOLD_FOCUS_PAUSE_AFTER_TAP_MS,
+} from '@/config/constants';
 import { resolutionForPreset } from '@/config/photoResolution';
-import { fitLongSide } from '@/imaging/downscale';
-import { loadImage } from '@/imaging/loadImage';
-import { readGrayFromSkImage } from '@/imaging/imagePixels';
-import { verifyFocusFromGray } from '@/perf/focusVerify';
+import { runFocusAnalysis } from '@/perf/focusAnalysis';
 import { registerTempUri } from '@/hooks/useTempFileCleanup';
 import { useAppState } from '@/state/AppState';
 import { ErrorBanner } from '@/ui/ErrorBanner';
@@ -39,6 +41,9 @@ export default function CaptureScreen() {
 
   const cameraRef = useRef<CameraRef>(null);
   const focusedOnNearRef = useRef(false);
+  const lastFocusTargetRef = useRef<FocusTarget>('none');
+  const lastFocusAtRef = useRef(0);
+  const lastTapAtRef = useRef(0);
   const photoOutput = usePhotoOutput({
     targetResolution: resolutionForPreset(state.captureSettings.photoResolution),
     qualityPrioritization: 'speed',
@@ -63,14 +68,61 @@ export default function CaptureScreen() {
       else setFarPoint(n);
       try {
         const view = normalizedToView(n, winW, previewHeight);
-        await cameraRef.current?.focusTo(view);
+        await cameraRef.current?.focusTo(view, CAPTURE_FOCUS_OPTIONS);
         focusedOnNearRef.current = mode === 'subject';
+        lastFocusTargetRef.current = mode === 'subject' ? 'subject' : 'background';
+        lastFocusAtRef.current = Date.now();
+        lastTapAtRef.current = Date.now();
       } catch {
         focusedOnNearRef.current = false;
       }
     },
     [mode, previewHeight, winW],
   );
+
+  useEffect(() => {
+    if (!focused || !farPoint || !state.captureSettings.holdBackgroundFocus || busy) return;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const schedule = (delayMs = HOLD_BACKGROUND_FOCUS_INTERVAL_MS) => {
+      if (cancelled) return;
+      timer = setTimeout(() => {
+        void tick();
+      }, delayMs);
+    };
+
+    const tick = async () => {
+      if (cancelled || busy) return;
+      if (Date.now() - lastTapAtRef.current < HOLD_FOCUS_PAUSE_AFTER_TAP_MS) {
+        schedule();
+        return;
+      }
+      const camera = cameraRef.current;
+      if (!camera) {
+        schedule();
+        return;
+      }
+      try {
+        const view = normalizedToView(farPoint, winW, previewHeight);
+        await camera.focusTo(view, CAPTURE_FOCUS_OPTIONS);
+        if (!cancelled) {
+          lastFocusTargetRef.current = 'background';
+          lastFocusAtRef.current = Date.now();
+        }
+      } catch {
+        // 前回の focusTo 未完了時に CameraX が OperationCanceledException を返すことがある
+      }
+      schedule();
+    };
+
+    schedule(HOLD_BACKGROUND_FOCUS_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [busy, farPoint, focused, previewHeight, state.captureSettings.holdBackgroundFocus, winW]);
 
   const onShutter = useCallback(async () => {
     if (!cameraRef.current || !photoOutput || !farPoint) return;
@@ -88,16 +140,29 @@ export default function CaptureScreen() {
         previewWidth: winW,
         previewHeight,
         focusedOnNear: focusedOnNearRef.current,
+        focusSession: {
+          lastTarget: lastFocusTargetRef.current,
+          lastAtMs: lastFocusAtRef.current,
+        },
+        holdFocusSession: state.captureSettings.holdBackgroundFocus
+          ? state.captureResult?.holdBackgroundFocus ?? {
+              enabled: true,
+              capturesWhileEnabled: 0,
+              focusASkippedCount: 0,
+            }
+          : undefined,
       });
       focusedOnNearRef.current = true;
       setLastCaptureMs(result.totalMs);
       try {
-        const { width: w, height: h } = fitLongSide(result.near.width, result.near.height, 512);
-        const nearLoaded = await loadImage(result.near.uri);
-        const farLoaded = await loadImage(result.far.uri);
-        const gn = readGrayFromSkImage(nearLoaded.image, 512);
-        const gf = readGrayFromSkImage(farLoaded.image, 512);
-        const fv = verifyFocusFromGray(gn, gf, w, h, nearPoint, farPoint);
+        const { verify: fv } = await runFocusAnalysis({
+          nearUri: result.near.uri,
+          farUri: result.far.uri,
+          nearOrientation: result.near.orientation,
+          farOrientation: result.far.orientation,
+          nearPoint,
+          farPoint,
+        });
         dispatch({ type: 'SET_FOCUS_VERIFY', payload: fv });
       } catch {
         dispatch({ type: 'SET_FOCUS_VERIFY', payload: null });
@@ -105,7 +170,17 @@ export default function CaptureScreen() {
       dispatch({ type: 'SET_CAPTURE_RESULT', payload: result });
       dispatch({
         type: 'SET_FUSION_SOURCE',
-        payload: { nearUri: result.near.uri, farUri: result.far.uri, from: 'capture' },
+        payload: {
+          nearUri: result.near.uri,
+          farUri: result.far.uri,
+          from: 'capture',
+          nearPoint,
+          farPoint,
+          captureWidth: result.near.width,
+          captureHeight: result.near.height,
+          nearOrientation: result.near.orientation,
+          farOrientation: result.far.orientation,
+        },
       });
       registerTempUri(dispatch, result.near.uri);
       registerTempUri(dispatch, result.far.uri);
@@ -130,7 +205,16 @@ export default function CaptureScreen() {
     if (goResult) {
       router.push('/result');
     }
-  }, [dispatch, farPoint, nearPoint, photoOutput, previewHeight, state.captureSettings, winW]);
+  }, [
+    dispatch,
+    farPoint,
+    nearPoint,
+    photoOutput,
+    previewHeight,
+    state.captureResult,
+    state.captureSettings,
+    winW,
+  ]);
 
   if (!hasPermission) {
     return (
