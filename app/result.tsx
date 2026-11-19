@@ -91,6 +91,7 @@ export default function ResultScreen() {
       previewLongSide: PREVIEW_FUSION_LONG_SIDE,
       maskUri: result.debug?.maskUri,
       strategyId: state.captureResult?.strategyId,
+      captureOrder: state.captureSettings.captureOrder,
       captureMs: state.captureResult?.totalMs,
       focusVerify: state.lastFocusVerify,
       captureWidth: source.captureWidth,
@@ -111,6 +112,7 @@ export default function ResultScreen() {
     result,
     source,
     state.captureResult,
+    state.captureSettings.captureOrder,
     state.captureSettings.scaleJointSearch,
     state.lastFocusVerify,
   ]);

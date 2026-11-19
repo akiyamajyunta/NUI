@@ -30,14 +30,16 @@ export const ALIGN_LONG_SIDE = 256;
 /** 信頼度がこの値未満なら位置合わせ offset を適用しない（0〜1） */
 export const ALIGN_MIN_CONFIDENCE = 0.3;
 
-/** 背景フォーカスからこの時間経過で撮影1前フォーカスを再実行（ms） */
-export const FOCUS_A_STALE_MS = 2000;
+/** 撮影1前フォーカスの fresh 判定許容時間（ms）の選択肢 */
+export type FocusFreshMaxMs = 2000 | 4000 | 8000;
 
 /** ピント維持: 背景点への focus 再指定間隔（ms） */
 export const HOLD_BACKGROUND_FOCUS_INTERVAL_MS = 1500;
 
 /** タップ直後この時間はピント維持を止める（ms） */
 export const HOLD_FOCUS_PAUSE_AFTER_TAP_MS = 3000;
+/** プレビュータップ後、シャッターを有効にするまでの待ち */
+export const SHUTTER_FOCUS_SETTLE_MS = 1000;
 
 /**
  * 鮮鋭度マップ（8bit）の符号化。ラプラシアン絶対値 lap を sqrt(lap / SHARPNESS_LAP_MAX) で格納し、
@@ -80,15 +82,23 @@ export const DEFAULT_FUSION_PARAMS: FusionParams = {
   colorMatch: true,
   align: false,
   scaleMode: 'estimate',
-  scaleFixed: 1,
+  scaleFixed: 1.02,
   scaleMinGain: 0.001,
+  scaleAdoptMin: 1.0,
+  scaleAdoptMax: 1.08,
 };
+
+/** 設定の拡大率固定値の許容範囲 */
+export const SCALE_FIXED_MIN = 0.98;
+export const SCALE_FIXED_MAX = 1.06;
 
 export const PREVIEW_FUSION_LONG_SIDE = 1024;
 
 export type CaptureStrategyId = 'S1' | 'S2' | 'S3';
 
 export type PhotoResolutionPreset = 'HD_4_3' | 'FHD_4_3' | 'UHD_4_3';
+
+export type CaptureOrder = 'far_then_near' | 'near_then_far';
 
 export type CaptureSettings = {
   strategyId: CaptureStrategyId;
@@ -109,6 +119,10 @@ export type CaptureSettings = {
   holdBackgroundFocus: boolean;
   /** 診断の scale×平行移動同時探索（重い）。既定オフ */
   scaleJointSearch: boolean;
+  /** 2枚の撮影順（NEAR/FAR の意味は不変） */
+  captureOrder: CaptureOrder;
+  /** 直近フォーカスからこの時間未満なら撮影1前フォーカスをスキップ（fresh） */
+  focusFreshMaxMs: FocusFreshMaxMs;
 };
 
 export const DEFAULT_CAPTURE_SETTINGS: CaptureSettings = {
@@ -125,4 +139,6 @@ export const DEFAULT_CAPTURE_SETTINGS: CaptureSettings = {
   closedLoopCapture: false,
   holdBackgroundFocus: false,
   scaleJointSearch: false,
+  captureOrder: 'far_then_near',
+  focusFreshMaxMs: 4000,
 };

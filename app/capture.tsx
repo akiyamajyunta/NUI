@@ -18,6 +18,7 @@ import { useCameraSetup } from '@/camera/useCameraSetup';
 import {
   HOLD_BACKGROUND_FOCUS_INTERVAL_MS,
   HOLD_FOCUS_PAUSE_AFTER_TAP_MS,
+  SHUTTER_FOCUS_SETTLE_MS,
 } from '@/config/constants';
 import { resolutionForPreset } from '@/config/photoResolution';
 import { runFocusAnalysis } from '@/perf/focusAnalysis';
@@ -57,9 +58,17 @@ export default function CaptureScreen() {
   const [busy, setBusy] = useState(false);
   const [lastCaptureMs, setLastCaptureMs] = useState<number | null>(null);
   const [error, setError] = useState('');
+  const [lastTapAt, setLastTapAt] = useState(0);
+  const [focusSettling, setFocusSettling] = useState(false);
 
   const farReady = farPoint != null;
-  const canShutter = farReady && !busy && device != null && supportsFocus;
+  const canShutter = farReady && !busy && !focusSettling && device != null && supportsFocus;
+
+  useEffect(() => {
+    if (lastTapAt <= 0) return undefined;
+    const end = setTimeout(() => setFocusSettling(false), SHUTTER_FOCUS_SETTLE_MS);
+    return () => clearTimeout(end);
+  }, [lastTapAt]);
 
   const onTapPreview = useCallback(
     async (x: number, y: number) => {
@@ -72,7 +81,10 @@ export default function CaptureScreen() {
         focusedOnNearRef.current = mode === 'subject';
         lastFocusTargetRef.current = mode === 'subject' ? 'subject' : 'background';
         lastFocusAtRef.current = Date.now();
-        lastTapAtRef.current = Date.now();
+        const at = Date.now();
+        lastTapAtRef.current = at;
+        setLastTapAt(at);
+        setFocusSettling(true);
       } catch {
         focusedOnNearRef.current = false;
       }
@@ -309,6 +321,7 @@ export default function CaptureScreen() {
             />
           </View>
           {!farReady && <Text style={styles.hint}>{S.captureNeedFar}</Text>}
+          {focusSettling && !busy && <Text style={styles.hint}>ピント合わせ中</Text>}
           {busy && <Text style={styles.hint}>{S.captureHold}</Text>}
           {lastCaptureMs != null && (
             <Text style={styles.metric}>撮影 {Math.round(lastCaptureMs)}ms</Text>

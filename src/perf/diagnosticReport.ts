@@ -15,6 +15,8 @@ import type {
   MaskBucketStats,
 } from '@/perf/fusionDiagnostics';
 import type { FocusVerifyResult } from '@/perf/focusVerify';
+import { captureOrderLabel, captureShotPlan } from '@/camera/captureOrder';
+import type { CaptureOrder } from '@/config/constants';
 import type { AlignScaleDiagnostic } from '@/perf/alignScaleDiagnostic';
 
 export function sharpnessRatioPct(output: number, reference: number): number {
@@ -87,6 +89,7 @@ export type DiagnosticReportData = {
   generatedAtIso: string;
   sourceFrom: 'capture' | 'import';
   strategyId?: string;
+  captureOrder?: CaptureOrder;
   captureMs?: number;
   focusVerify?: FocusVerifyResult | null;
   captureSize?: { width: number; height: number };
@@ -191,6 +194,11 @@ export function formatDiagnosticReportText(data: DiagnosticReportData): string {
   lines.push('【撮影情報】');
   lines.push(`ソース: ${data.sourceFrom === 'capture' ? 'カメラ撮影' : 'ギャラリー'}`);
   if (data.strategyId) lines.push(`撮影戦略: ${data.strategyId}`);
+  if (data.captureOrder) {
+    const plan = captureShotPlan(data.captureOrder);
+    lines.push(`撮影順: ${captureOrderLabel(data.captureOrder)}`);
+    lines.push(`  撮影1=${plan.shot1Label} / 撮影2=${plan.shot2Label}`);
+  }
   if (data.captureMs != null) lines.push(`撮影時間: ${Math.round(data.captureMs)} ms`);
   if (data.focusVerify) lines.push(`ピント検証: ${data.focusVerify}`);
   if (data.captureSize) {
@@ -203,9 +211,14 @@ export function formatDiagnosticReportText(data: DiagnosticReportData): string {
     lines.push('');
     lines.push('【撮影1前フォーカス（スマート）】');
     lines.push(`  実行: ${f.executed ? 'あり' : 'スキップ'} / 理由: ${f.reason}`);
+    const shot1 =
+      f.shot1Target === 'subject' ? 'ぬい点' : f.shot1Target === 'background' ? '背景点' : '—';
+    lines.push(`  撮影1の対象: ${shot1}`);
+    const freshMax = f.focusFreshMaxMs ?? 4000;
     lines.push(
-      `  直近フォーカス対象: ${f.lastFocusTarget} / 経過: ${f.elapsedSinceFocusMs} ms`,
+      `  fresh許容: ${freshMax} ms / 直近フォーカスからの経過: ${f.elapsedSinceFocusMs} ms`,
     );
+    lines.push(`  直近フォーカス対象: ${f.lastFocusTarget}`);
   }
   if (data.holdBackgroundFocus?.enabled) {
     const h = data.holdBackgroundFocus;
@@ -224,11 +237,14 @@ export function formatDiagnosticReportText(data: DiagnosticReportData): string {
     lines.push('【撮影シーケンス ms】');
     const s = data.captureSegments;
     const ms = (v: number | undefined) => (v != null ? String(Math.round(v)) : '—');
-    lines.push(`  ${fmtFocusSeg('背景フォーカス', s.focusA)}`);
-    lines.push(`  撮影1（背景）: ${ms(s.photoA)}`);
+    lines.push(`  ${fmtFocusSeg('撮影1前フォーカス', s.focusA)}`);
+    const shotLabels = data.captureOrder
+      ? captureShotPlan(data.captureOrder)
+      : { shot1Label: '撮影1', shot2Label: '撮影2' };
+    lines.push(`  撮影1（${shotLabels.shot1Label}）: ${ms(s.photoA)}`);
     lines.push(`  待ち（S3等）: ${ms(s.delay)}`);
-    lines.push(`  ${fmtFocusSeg('ぬいフォーカス', s.focusB)}`);
-    lines.push(`  撮影2（ぬい）: ${ms(s.photoB)}`);
+    lines.push(`  ${fmtFocusSeg('撮影2前フォーカス', s.focusB)}`);
+    lines.push(`  撮影2（${shotLabels.shot2Label}）: ${ms(s.photoB)}`);
     if (s.retryFar?.executed || s.retryNear?.executed) {
       lines.push(
         `  閉ループ再撮: FAR ${s.retryFar?.executed ? `あり ${ms(s.retryFar.ms)}` : 'なし'} / NEAR ${s.retryNear?.executed ? `あり ${ms(s.retryNear.ms)}` : 'なし'}`,
@@ -270,13 +286,44 @@ export function formatDiagnosticReportText(data: DiagnosticReportData): string {
   if (data.align.subpixelNote) lines.push(`粗さ: ${data.align.subpixelNote}`);
   if (data.scaleCorrection) {
     const s = data.scaleCorrection;
+    const sourceLabel =
+      s.scaleSource === 'coarse'
+        ? '粗探索の最良値'
+        : s.scaleSource === 'fine'
+          ? '精密探索の最良値'
+          : s.scaleSource === 'recent'
+            ? '直近の推定値'
+            : '固定値';
     lines.push('');
     lines.push('【拡大率補正】');
     lines.push(
-      `  mode=${s.mode} 推定=${s.estimatedScale.toFixed(3)} 適用=${s.appliedScale.toFixed(3)} fallback=${s.fellBack ? 'あり' : 'なし'} しきい値=${s.minGain.toFixed(4)} 長辺=${s.analysisLongSide}px`,
+      `  mode=${s.mode} 適用=${s.appliedScale.toFixed(3)} 出所=${sourceLabel} fallback=${s.fellBack ? 'あり' : 'なし'} 採用範囲=${s.adoptMin.toFixed(3)}〜${s.adoptMax.toFixed(3)}`,
+    );
+    const fineLine = s.fineSkipped
+      ? '精密探索: スキップ'
+      : `精密探索 長辺=${s.analysisLongSide}px ${Math.round(s.fineMs)} ms`;
+    lines.push(
+      `  粗探索 長辺=${s.coarseLongSide}px ${Math.round(s.coarseMs)} ms / ${fineLine}（合計 ${Math.round(s.ms)} ms）`,
     );
     lines.push(
-      `  補正前NCC=${s.nccBefore.toFixed(4)} 推定scaleのNCC=${s.nccAtEstimate.toFixed(4)} 適用後NCC=${s.nccAfter.toFixed(4)} / ${Math.round(s.ms)} ms`,
+      `  粗最良 scale=${s.coarseBestScale.toFixed(3)} NCC=${s.coarseBestNcc.toFixed(4)}`,
+    );
+    if (s.fineBestScale != null && s.fineBestNcc != null) {
+      lines.push(
+        `  精密最良 scale=${s.fineBestScale.toFixed(3)} NCC=${s.fineBestNcc.toFixed(4)}（精密採用しきい値 +${s.fineAdoptMinNcc.toFixed(3)} NCC）`,
+      );
+    }
+    lines.push(
+      `  補正前NCC=${s.nccBefore.toFixed(4)} 適用scaleのNCC=${s.nccAtEstimate.toFixed(4)} 適用後NCC=${s.nccAfter.toFixed(4)}`,
+    );
+    if (s.coarseTopNcc.length > 0) {
+      const top = s.coarseTopNcc
+        .map((p) => `${p.scale.toFixed(3)}:${p.ncc.toFixed(4)}`)
+        .join('  ');
+      lines.push(`  粗探索NCC上位: ${top}`);
+    }
+    lines.push(
+      `  ピークの鋭さ=${s.peakSharpness.toFixed(4)}（閾値 ${s.peakSharpnessMin.toFixed(3)}、${s.peakSharpness >= s.peakSharpnessMin ? '信頼' : '平坦'}）`,
     );
   }
   const joint = data.alignScaleProbe?.joint;

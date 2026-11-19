@@ -5,6 +5,11 @@ import {
   TileMode,
   type SkImage,
 } from '@shopify/react-native-skia';
+import {
+  FAR_CATMULL_B,
+  FAR_CATMULL_C,
+  farUsesNearestSample,
+} from '@/imaging/farSampling';
 import { fitLongSide } from '@/imaging/fitLongSide';
 
 export { fitLongSide };
@@ -31,4 +36,12 @@ export function resizeSkImage(source: SkImage, targetW: number, targetH: number)
 
 export function imageShaderBilinear(image: SkImage, w: number, h: number) {
   return image.makeShaderOptions(TileMode.Clamp, TileMode.Clamp, FilterMode.Linear, MipmapMode.None);
+}
+
+/** 拡大した FAR。1.0 付近は最近傍、それ以外は Catmull-Rom */
+export function imageShaderForFar(image: SkImage, scale: number) {
+  if (farUsesNearestSample(scale)) {
+    return image.makeShaderOptions(TileMode.Clamp, TileMode.Clamp, FilterMode.Nearest, MipmapMode.None);
+  }
+  return image.makeShaderCubic(TileMode.Clamp, TileMode.Clamp, FAR_CATMULL_B, FAR_CATMULL_C);
 }

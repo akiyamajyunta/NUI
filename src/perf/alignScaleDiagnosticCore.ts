@@ -1,9 +1,29 @@
-import type { NormalizedPoint } from '@/types';
+import { DISPLAY_BUFFER, displayNormalizedToBufferNormalized } from '@/imaging/displayPoint';
+import type { NormalizedPoint, ScaleEstimateSource, ScaleNccSample } from '@/types';
+import {
+  medianRecentTrustworthyScales,
+  pushTrustworthyScale,
+} from '@/perf/scaleEstimateHistory';
 
 /** 同時探索など診断専用の縮小長辺 */
 export const SCALE_DIAG_LONG_SIDE = 80;
-/** 拡大率推定の比較画像。長辺 192〜256px */
-export const SCALE_ESTIMATE_LONG_SIDE = 256;
+/** 粗探索の長辺 */
+export const SCALE_COARSE_LONG_SIDE = 80;
+/** 精密探索の長辺（上限 160px） */
+export const SCALE_ESTIMATE_LONG_SIDE = 160;
+export const SCALE_FINE_STEP = 0.002;
+/** 精密探索の半幅 */
+export const SCALE_FINE_RADIUS = 0.01;
+/** 精密最良が粗最良よりこの分以上 NCC が高いときだけ精密値を採用 */
+export const SCALE_FINE_ADOPT_MIN_NCC = 0.001;
+export const SCALE_ADOPT_MIN_DEFAULT = 1.0;
+export const SCALE_ADOPT_MAX_DEFAULT = 1.08;
+/** 粗探索ピーク鋭さの評価半幅 */
+export const SCALE_COARSE_PEAK_RADIUS = 0.01;
+/** これ未満ならピークが平坦とみなし推定を信頼しない。既定 0.005 */
+export const SCALE_PEAK_SHARPNESS_MIN = 0.005;
+/** 履歴が無いときの固定倍率既定 */
+export const SCALE_FIXED_DEFAULT = 1.02;
 /** 両画像に同じ半径のボックスぼかし（分析px） */
 export const SCALE_DIAG_BLUR_RADIUS_PX = 2;
 
@@ -263,6 +283,13 @@ function searchScaleAndTranslation(
   };
 }
 
+export type GrayScalePair = {
+  grayNear: Float32Array;
+  grayFar: Float32Array;
+  w: number;
+  h: number;
+};
+
 export type AppliedScaleEstimate = {
   estimatedScale: number;
   appliedScale: number;
@@ -273,64 +300,395 @@ export type AppliedScaleEstimate = {
   fellBack: boolean;
   minGain: number;
   analysisLongSide: number;
+  coarseLongSide: number;
   ms: number;
+  coarseMs: number;
+  fineMs: number;
+  coarseTopNcc: ScaleNccSample[];
+  peakSharpness: number;
+  peakSharpnessMin: number;
+  scaleSource: ScaleEstimateSource;
+  fineSkipped: boolean;
+  coarseBestScale: number;
+  coarseBestNcc: number;
+  fineBestScale: number | null;
+  fineBestNcc: number | null;
+  adoptMin: number;
+  adoptMax: number;
+  fineAdoptMinNcc: number;
 };
 
-export function estimateAppliedScale(
+/** 精密探索で試す scale 一覧（粗最良の ±SCALE_FINE_RADIUS、SCALE_FINE_STEP 刻み） */
+export function fineSearchScalesAround(coarseBestScale: number): number[] {
+  const fineMin = Math.max(
+    SCALE_MIN,
+    Math.round((coarseBestScale - SCALE_FINE_RADIUS) * 1000) / 1000,
+  );
+  const fineMax = Math.min(
+    SCALE_MAX,
+    Math.round((coarseBestScale + SCALE_FINE_RADIUS) * 1000) / 1000,
+  );
+  return scalesInRange(fineMin, fineMax, SCALE_FINE_STEP);
+}
+
+function scalesInRange(min: number, max: number, step: number): number[] {
+  const n = Math.round((max - min) / step) + 1;
+  const out: number[] = [];
+  for (let i = 0; i < n; i += 1) {
+    const s = Math.round((min + i * step) * 1000) / 1000;
+    out.push(Math.min(max, Math.max(min, s)));
+  }
+  return out;
+}
+
+function searchScaleSamples(
   grayNear: Float32Array,
   grayFar: Float32Array,
   w: number,
   h: number,
   subject: NormalizedPoint,
+  scales: readonly number[],
+): { samples: ScaleNccSample[]; bestIndex: number; ms: number } {
+  const t0 = performance.now();
+  const samples: ScaleNccSample[] = [];
+  let bestIndex = 0;
+  for (let i = 0; i < scales.length; i += 1) {
+    const scale = scales[i];
+    const ncc = maskedNccGray(grayNear, grayFar, w, h, scale, 0, 0, subject);
+    samples.push({ scale, ncc });
+    if (ncc > samples[bestIndex].ncc) bestIndex = i;
+  }
+  return { samples, bestIndex, ms: performance.now() - t0 };
+}
+
+function topNccSamples(samples: readonly ScaleNccSample[], n: number): ScaleNccSample[] {
+  return [...samples].sort((a, b) => b.ncc - a.ncc).slice(0, n);
+}
+
+function peakSharpnessAt(
+  grayNear: Float32Array,
+  grayFar: Float32Array,
+  w: number,
+  h: number,
+  subject: NormalizedPoint,
+  bestScale: number,
+  bestNcc: number,
+  radius: number,
+): number {
+  const lo = maskedNccGray(grayNear, grayFar, w, h, bestScale - radius, 0, 0, subject);
+  const hi = maskedNccGray(grayNear, grayFar, w, h, bestScale + radius, 0, 0, subject);
+  return bestNcc - Math.max(lo, hi);
+}
+
+function clampScale(scale: number): number {
+  return Math.min(SCALE_MAX, Math.max(SCALE_MIN, scale));
+}
+
+function emptyScaleEstimate(
+  minGain: number,
+  coarse: GrayScalePair,
+  fine: GrayScalePair,
+  ms: number,
+): AppliedScaleEstimate {
+  return {
+    estimatedScale: 1,
+    appliedScale: 1,
+    nccBefore: 0,
+    nccAtEstimate: 0,
+    nccAfter: 0,
+    fellBack: false,
+    minGain,
+    analysisLongSide: Math.max(fine.w, fine.h),
+    coarseLongSide: Math.max(coarse.w, coarse.h),
+    ms,
+    coarseMs: 0,
+    fineMs: 0,
+    coarseTopNcc: [],
+    peakSharpness: 0,
+    peakSharpnessMin: SCALE_PEAK_SHARPNESS_MIN,
+    scaleSource: 'fixed',
+    fineSkipped: false,
+    coarseBestScale: 1,
+    coarseBestNcc: 0,
+    fineBestScale: null,
+    fineBestNcc: null,
+    adoptMin: SCALE_ADOPT_MIN_DEFAULT,
+    adoptMax: SCALE_ADOPT_MAX_DEFAULT,
+    fineAdoptMinNcc: SCALE_FINE_ADOPT_MIN_NCC,
+  };
+}
+
+function subjectAt(
+  subjectDisplay: NormalizedPoint,
+  w: number,
+  h: number,
+): NormalizedPoint {
+  return displayNormalizedToBufferNormalized(subjectDisplay, w, h, DISPLAY_BUFFER);
+}
+
+function pickFallbackScale(fixedApplied: number) {
+  const median = medianRecentTrustworthyScales();
+  if (median != null) {
+    return { scale: clampScale(median), source: 'recent' as const };
+  }
+  return { scale: fixedApplied, source: 'fixed' as const };
+}
+
+function isInAdoptRange(scale: number, adoptMin: number, adoptMax: number): boolean {
+  return scale >= adoptMin && scale <= adoptMax;
+}
+
+export type CoarseSearchResult = {
+  coarseBest: ScaleNccSample;
+  coarseTopNcc: ScaleNccSample[];
+  peakSharpness: number;
+  coarseMs: number;
+  coarseLongSide: number;
+};
+
+/** @deprecated finalizeScaleEstimate 用の別名 */
+export type SharpCoarsePeakContext = CoarseSearchResult;
+
+export function runCoarseScaleSearch(
+  coarse: GrayScalePair,
+  subjectDisplay: NormalizedPoint,
+): CoarseSearchResult {
+  const {
+    grayNear: cNear,
+    grayFar: cFar,
+    w: cw,
+    h: ch,
+  } = coarse;
+  const subjectC = subjectAt(subjectDisplay, cw, ch);
+  const coarseLongSide = Math.max(cw, ch);
+  const coarseScales = scalesInRange(SCALE_MIN, SCALE_MAX, SCALE_STEP);
+  const coarseFound = searchScaleSamples(cNear, cFar, cw, ch, subjectC, coarseScales);
+  const coarseTopNcc = topNccSamples(coarseFound.samples, 5);
+  const coarseBest = coarseFound.samples[coarseFound.bestIndex];
+  const peakSharpness = peakSharpnessAt(
+    cNear,
+    cFar,
+    cw,
+    ch,
+    subjectC,
+    coarseBest.scale,
+    coarseBest.ncc,
+    SCALE_COARSE_PEAK_RADIUS,
+  );
+  return {
+    coarseBest,
+    coarseTopNcc,
+    peakSharpness,
+    coarseMs: coarseFound.ms,
+    coarseLongSide,
+  };
+}
+
+export type FinalizeScaleOptions = {
+  adoptMin: number;
+  adoptMax: number;
+  fixedScale: number;
+  fineAdoptMinNcc: number;
+  minGain: number;
+};
+
+function buildScaleEstimateBase(
+  coarseResult: CoarseSearchResult,
+  opts: FinalizeScaleOptions,
+  partial: Partial<AppliedScaleEstimate>,
+): AppliedScaleEstimate {
+  return {
+    estimatedScale: coarseResult.coarseBest.scale,
+    appliedScale: coarseResult.coarseBest.scale,
+    nccBefore: 0,
+    nccAtEstimate: coarseResult.coarseBest.ncc,
+    nccAfter: 0,
+    fellBack: false,
+    minGain: opts.minGain,
+    analysisLongSide: coarseResult.coarseLongSide,
+    coarseLongSide: coarseResult.coarseLongSide,
+    ms: 0,
+    coarseMs: coarseResult.coarseMs,
+    fineMs: 0,
+    coarseTopNcc: coarseResult.coarseTopNcc,
+    peakSharpness: coarseResult.peakSharpness,
+    peakSharpnessMin: SCALE_PEAK_SHARPNESS_MIN,
+    scaleSource: 'coarse',
+    fineSkipped: true,
+    coarseBestScale: coarseResult.coarseBest.scale,
+    coarseBestNcc: coarseResult.coarseBest.ncc,
+    fineBestScale: null,
+    fineBestNcc: null,
+    adoptMin: opts.adoptMin,
+    adoptMax: opts.adoptMax,
+    fineAdoptMinNcc: opts.fineAdoptMinNcc,
+    ...partial,
+  };
+}
+
+export function finalizeScaleEstimate(
+  coarseResult: CoarseSearchResult,
+  coarse: GrayScalePair,
+  fine: GrayScalePair | null,
+  subjectDisplay: NormalizedPoint,
+  opts: FinalizeScaleOptions,
+  t0: number,
+): AppliedScaleEstimate {
+  const fixedApplied = clampScale(opts.fixedScale);
+  const {
+    grayNear: cNear,
+    grayFar: cFar,
+    w: cw,
+    h: ch,
+  } = coarse;
+  const subjectC = subjectAt(subjectDisplay, cw, ch);
+
+  if (!isInAdoptRange(coarseResult.coarseBest.scale, opts.adoptMin, opts.adoptMax)) {
+    const fb = pickFallbackScale(fixedApplied);
+    const nccBefore = maskedNccGray(cNear, cFar, cw, ch, 1, 0, 0, subjectC);
+    const nccAfter = maskedNccGray(cNear, cFar, cw, ch, fb.scale, 0, 0, subjectC);
+    return buildScaleEstimateBase(coarseResult, opts, {
+      appliedScale: fb.scale,
+      nccBefore,
+      nccAfter,
+      fellBack: true,
+      scaleSource: fb.source,
+      fineSkipped: true,
+      ms: performance.now() - t0,
+    });
+  }
+
+  if (!fine) {
+    throw new Error('fine gray required when coarse best is in adopt range');
+  }
+
+  const {
+    grayNear: fNear,
+    grayFar: fFar,
+    w: fw,
+    h: fh,
+  } = fine;
+  const subjectF = subjectAt(subjectDisplay, fw, fh);
+  const nccBefore = maskedNccGray(fNear, fFar, fw, fh, 1, 0, 0, subjectF);
+  const coarseNccOnFine = maskedNccGray(
+    fNear,
+    fFar,
+    fw,
+    fh,
+    coarseResult.coarseBest.scale,
+    0,
+    0,
+    subjectF,
+  );
+  const fineScales = fineSearchScalesAround(coarseResult.coarseBest.scale);
+  const fineFound = searchScaleSamples(fNear, fFar, fw, fh, subjectF, fineScales);
+  const fineBest = fineFound.samples[fineFound.bestIndex];
+
+  let appliedScale = coarseResult.coarseBest.scale;
+  let scaleSource: ScaleEstimateSource = 'coarse';
+  let nccAtEstimate = coarseNccOnFine;
+  if (fineBest.ncc >= coarseNccOnFine + opts.fineAdoptMinNcc) {
+    appliedScale = fineBest.scale;
+    scaleSource = 'fine';
+    nccAtEstimate = fineBest.ncc;
+    pushTrustworthyScale(fineBest.scale);
+  } else {
+    pushTrustworthyScale(coarseResult.coarseBest.scale);
+  }
+
+  const nccAfter = maskedNccGray(fNear, fFar, fw, fh, appliedScale, 0, 0, subjectF);
+
+  return buildScaleEstimateBase(coarseResult, opts, {
+    estimatedScale: appliedScale,
+    appliedScale,
+    nccBefore,
+    nccAtEstimate,
+    nccAfter,
+    analysisLongSide: Math.max(fw, fh),
+    ms: performance.now() - t0,
+    fineMs: fineFound.ms,
+    scaleSource,
+    fineSkipped: false,
+    fineBestScale: fineBest.scale,
+    fineBestNcc: fineBest.ncc,
+  });
+}
+
+export function estimateAppliedScale(
+  coarse: GrayScalePair,
+  fine: GrayScalePair | null,
+  subjectDisplay: NormalizedPoint,
   mode: 'off' | 'estimate' | 'fixed',
-  fixedScale = 1,
+  fixedScale = SCALE_FIXED_DEFAULT,
   minGain = SCALE_MIN_GAIN,
+  adoptMin = SCALE_ADOPT_MIN_DEFAULT,
+  adoptMax = SCALE_ADOPT_MAX_DEFAULT,
 ): AppliedScaleEstimate {
   const t0 = performance.now();
-  const longSide = Math.max(w, h);
+  const coarseLongSide = Math.max(coarse.w, coarse.h);
+  const finePlaceholder: GrayScalePair = fine ?? coarse;
   if (mode === 'off') {
-    return {
-      estimatedScale: 1,
-      appliedScale: 1,
-      nccBefore: 0,
-      nccAtEstimate: 0,
-      nccAfter: 0,
-      fellBack: false,
-      minGain,
-      analysisLongSide: longSide,
-      ms: performance.now() - t0,
-    };
+    return emptyScaleEstimate(minGain, coarse, finePlaceholder, performance.now() - t0);
   }
-  const nccBefore = maskedNccGray(grayNear, grayFar, w, h, 1, 0, 0, subject);
+
+  const {
+    grayNear: cNear,
+    grayFar: cFar,
+    w: cw,
+    h: ch,
+  } = coarse;
+  const subjectC = subjectAt(subjectDisplay, cw, ch);
+  const fixedApplied = clampScale(fixedScale);
+
   if (mode === 'fixed') {
-    const applied = Math.min(SCALE_MAX, Math.max(SCALE_MIN, fixedScale));
-    const nccAfter = maskedNccGray(grayNear, grayFar, w, h, applied, 0, 0, subject);
+    const nccBefore = maskedNccGray(cNear, cFar, cw, ch, 1, 0, 0, subjectC);
+    const nccAfter = maskedNccGray(cNear, cFar, cw, ch, fixedApplied, 0, 0, subjectC);
     return {
-      estimatedScale: applied,
-      appliedScale: applied,
+      estimatedScale: fixedApplied,
+      appliedScale: fixedApplied,
       nccBefore,
       nccAtEstimate: nccAfter,
       nccAfter,
       fellBack: false,
       minGain,
-      analysisLongSide: longSide,
+      analysisLongSide: fine ? Math.max(fine.w, fine.h) : coarseLongSide,
+      coarseLongSide,
       ms: performance.now() - t0,
+      coarseMs: 0,
+      fineMs: 0,
+      coarseTopNcc: [],
+      peakSharpness: 0,
+      peakSharpnessMin: SCALE_PEAK_SHARPNESS_MIN,
+      scaleSource: 'fixed',
+      fineSkipped: true,
+      coarseBestScale: fixedApplied,
+      coarseBestNcc: nccAfter,
+      fineBestScale: null,
+      fineBestNcc: null,
+      adoptMin: SCALE_ADOPT_MIN_DEFAULT,
+      adoptMax: SCALE_ADOPT_MAX_DEFAULT,
+      fineAdoptMinNcc: SCALE_FINE_ADOPT_MIN_NCC,
     };
   }
-  const found = searchScaleOnly(grayNear, grayFar, w, h, subject, nccBefore);
-  const gain = found.bestNcc - nccBefore;
-  const fellBack = gain < minGain;
-  return {
-    estimatedScale: found.bestScale,
-    appliedScale: fellBack ? 1 : found.bestScale,
-    nccBefore,
-    nccAtEstimate: found.bestNcc,
-    nccAfter: fellBack ? nccBefore : found.bestNcc,
-    fellBack,
-    minGain,
-    analysisLongSide: longSide,
-    ms: performance.now() - t0,
-  };
+
+  const coarseResult = runCoarseScaleSearch(
+    { grayNear: cNear, grayFar: cFar, w: cw, h: ch },
+    subjectDisplay,
+  );
+  return finalizeScaleEstimate(
+    coarseResult,
+    { grayNear: cNear, grayFar: cFar, w: cw, h: ch },
+    fine,
+    subjectDisplay,
+    {
+      adoptMin,
+      adoptMax,
+      fixedScale,
+      fineAdoptMinNcc: SCALE_FINE_ADOPT_MIN_NCC,
+      minGain,
+    },
+    t0,
+  );
 }
 
 export function runAlignScaleDiagnostic(

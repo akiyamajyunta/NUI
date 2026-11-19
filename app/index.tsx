@@ -7,7 +7,7 @@ import { MetricRow } from '@/ui/MetricRow';
 import { S } from '@/ui/strings';
 
 /** ホーム上部に出す。JS を端末へ載せたときにここが変わる */
-const APP_DISPLAY_VERSION = '1119-3';
+const APP_DISPLAY_VERSION = '1119-6';
 
 export default function HomeScreen() {
   const { device, supportsFocus } = useCameraSetup();

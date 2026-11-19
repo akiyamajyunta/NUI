@@ -16,6 +16,7 @@ import { describeAlignSearchCost, formatAlignSubpixelNote } from '@/perf/alignIn
 import { DISPLAY_BUFFER } from '@/imaging/displayPoint';
 import { measureBackgroundEdgeScale } from '@/perf/alignScaleDiagnostic';
 import { captureSegments } from '@/perf/timelineSegments';
+import type { CaptureOrder } from '@/config/constants';
 import type {
   ClosedLoopRetryReport,
   FocusABeforeShotReport,
@@ -38,6 +39,7 @@ export type CollectDiagnosticOpts = {
   previewLongSide: number;
   maskUri?: string;
   strategyId?: string;
+  captureOrder?: CaptureOrder;
   captureMs?: number;
   focusVerify?: FocusVerifyResult | null;
   captureWidth?: number;
@@ -124,6 +126,7 @@ export async function collectDiagnosticReportData(
     generatedAtIso: new Date().toISOString(),
     sourceFrom: opts.sourceFrom,
     strategyId: opts.strategyId,
+    captureOrder: opts.captureOrder,
     captureMs: opts.captureMs,
     focusVerify: opts.focusVerify,
     captureSize:

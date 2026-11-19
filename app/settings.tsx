@@ -1,20 +1,37 @@
 import { Stack } from 'expo-router';
-import { Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import { useState } from 'react';
+import { Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { SCALE_FIXED_MAX, SCALE_FIXED_MIN } from '@/config/constants';
 import {
+  type CaptureOrder,
   type CaptureSettings,
   type CaptureStrategyId,
   type PhotoResolutionPreset,
 } from '@/config/constants';
+import { captureOrderLabel } from '@/camera/captureOrder';
 import type { FusionParams, ScaleCorrectionMode } from '@/types';
 import { useAppState } from '@/state/AppState';
 
 const STRATEGIES: CaptureStrategyId[] = ['S1', 'S2', 'S3'];
+const CAPTURE_ORDERS: CaptureOrder[] = ['far_then_near', 'near_then_far'];
 const RESOLUTIONS: PhotoResolutionPreset[] = ['HD_4_3', 'FHD_4_3', 'UHD_4_3'];
 const S3_DELAYS: CaptureSettings['s3ExtraDelayMs'][] = [0, 50, 100, 200];
 const FOCUS_SETTLES: CaptureSettings['focusSettleMs'][] = [0, 100, 200, 300];
+const FOCUS_FRESH_MAX: CaptureSettings['focusFreshMaxMs'][] = [2000, 4000, 8000];
 const SCALE_MODES: ScaleCorrectionMode[] = ['off', 'estimate', 'fixed'];
-const SCALE_FIXED_VALUES = [0.95, 0.98, 1, 1.02, 1.05, 1.08, 1.1];
 const SCALE_MIN_GAINS = [0.0005, 0.001, 0.002, 0.005];
+const SCALE_ADOPT_MINS = [1.0, 0.98] as const;
+const SCALE_ADOPT_MAXS = [1.08, 1.1] as const;
+
+function clampScaleFixed(v: number): number {
+  return Math.min(SCALE_FIXED_MAX, Math.max(SCALE_FIXED_MIN, v));
+}
+
+function parseScaleFixedInput(text: string, fallback: number): number {
+  const n = Number.parseFloat(text.replace(',', '.'));
+  if (!Number.isFinite(n)) return fallback;
+  return clampScaleFixed(Math.round(n * 1000) / 1000);
+}
 
 function scaleModeLabel(mode: ScaleCorrectionMode): string {
   if (mode === 'off') return 'オフ';
@@ -26,6 +43,7 @@ export default function SettingsScreen() {
   const { state, dispatch } = useAppState();
   const s = state.captureSettings;
   const fusion = state.fusionParams;
+  const [scaleFixedDraft, setScaleFixedDraft] = useState(() => fusion.scaleFixed.toFixed(3));
 
   const patch = (p: Partial<CaptureSettings>) => {
     dispatch({ type: 'SET_CAPTURE_SETTINGS', payload: { ...s, ...p } });
@@ -49,6 +67,11 @@ export default function SettingsScreen() {
           onPress={() => patch({ strategyId: cycle(STRATEGIES, s.strategyId) })}
         />
         <PickerRow
+          label="撮影順"
+          value={captureOrderLabel(s.captureOrder)}
+          onPress={() => patch({ captureOrder: cycle(CAPTURE_ORDERS, s.captureOrder) })}
+        />
+        <PickerRow
           label="写真解像度"
           value={s.photoResolution}
           onPress={() => patch({ photoResolution: cycle(RESOLUTIONS, s.photoResolution) })}
@@ -69,6 +92,11 @@ export default function SettingsScreen() {
           label="フォーカス後の待ち (ms)"
           value={String(s.focusSettleMs)}
           onPress={() => patch({ focusSettleMs: cycle(FOCUS_SETTLES, s.focusSettleMs) })}
+        />
+        <PickerRow
+          label="fresh判定の許容時間"
+          value={`${s.focusFreshMaxMs / 1000}秒`}
+          onPress={() => patch({ focusFreshMaxMs: cycle(FOCUS_FRESH_MAX, s.focusFreshMaxMs) })}
         />
         <Row
           label="撮影1前に必ずフォーカス"
@@ -96,20 +124,40 @@ export default function SettingsScreen() {
           value={scaleModeLabel(fusion.scaleMode)}
           onPress={() => patchFusion({ scaleMode: cycle(SCALE_MODES, fusion.scaleMode) })}
         />
-        {fusion.scaleMode === 'fixed' ? (
-          <PickerRow
-            label="拡大率の固定値"
-            value={fusion.scaleFixed.toFixed(2)}
-            onPress={() =>
-              patchFusion({ scaleFixed: cycle(SCALE_FIXED_VALUES, fusion.scaleFixed) })
-            }
+        <View style={styles.row}>
+          <Text style={styles.label}>拡大率の固定値（{SCALE_FIXED_MIN.toFixed(3)}〜{SCALE_FIXED_MAX.toFixed(3)}）</Text>
+          <TextInput
+            style={styles.scaleInput}
+            value={scaleFixedDraft}
+            onChangeText={setScaleFixedDraft}
+            onBlur={() => {
+              const v = parseScaleFixedInput(scaleFixedDraft, fusion.scaleFixed);
+              setScaleFixedDraft(v.toFixed(3));
+              patchFusion({ scaleFixed: v });
+            }}
+            keyboardType="decimal-pad"
+            maxLength={6}
           />
-        ) : null}
+        </View>
         <PickerRow
           label="拡大率フォールバックしきい値"
           value={fusion.scaleMinGain.toFixed(4)}
           onPress={() =>
             patchFusion({ scaleMinGain: cycle(SCALE_MIN_GAINS, fusion.scaleMinGain) })
+          }
+        />
+        <PickerRow
+          label="粗最良の採用下限"
+          value={fusion.scaleAdoptMin.toFixed(2)}
+          onPress={() =>
+            patchFusion({ scaleAdoptMin: cycle([...SCALE_ADOPT_MINS], fusion.scaleAdoptMin) })
+          }
+        />
+        <PickerRow
+          label="粗最良の採用上限"
+          value={fusion.scaleAdoptMax.toFixed(2)}
+          onPress={() =>
+            patchFusion({ scaleAdoptMax: cycle([...SCALE_ADOPT_MAXS], fusion.scaleAdoptMax) })
           }
         />
         <Row
@@ -172,4 +220,15 @@ const styles = StyleSheet.create({
   label: { color: '#ddd', flex: 1, paddingRight: 12 },
   value: { color: '#58a6ff', fontWeight: '600' },
   note: { color: '#666', marginTop: 24, fontSize: 12, lineHeight: 18 },
+  scaleInput: {
+    minWidth: 72,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    color: '#58a6ff',
+    fontWeight: '600',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#444',
+    borderRadius: 6,
+    textAlign: 'right',
+  },
 });

@@ -95,9 +95,31 @@ describe('formatDiagnosticReportClipboard', () => {
         nccAfter: 0.91,
         fellBack: false,
         minGain: 0.001,
-        analysisLongSide: 256,
+        analysisLongSide: 160,
+        coarseLongSide: 80,
         ms: 40,
+        coarseMs: 12,
+        fineMs: 28,
+        coarseTopNcc: [
+          { scale: 1.02, ncc: 0.91 },
+          { scale: 1.015, ncc: 0.905 },
+          { scale: 1.025, ncc: 0.9 },
+          { scale: 1.01, ncc: 0.89 },
+          { scale: 1.03, ncc: 0.885 },
+        ],
+        peakSharpness: 0.008,
+        peakSharpnessMin: 0.005,
+        scaleSource: 'coarse',
+        fineSkipped: false,
+        coarseBestScale: 1.018,
+        coarseBestNcc: 0.91,
+        fineBestScale: 1.019,
+        fineBestNcc: 0.912,
+        adoptMin: 1.0,
+        adoptMax: 1.08,
+        fineAdoptMinNcc: 0.001,
       },
+      captureOrder: 'far_then_near',
     };
     const out = formatDiagnosticReportClipboard(data);
     expect(out).toContain('S_near: 最小 0.0010 / 中央値 0.0200 / 最大 0.4000');
@@ -113,8 +135,12 @@ describe('formatDiagnosticReportClipboard', () => {
     expect(out).toContain('混合 背景周辺: 10.0%');
     expect(out).toContain('拡大率補正');
     expect(out).toContain('補正前NCC=0.8800');
-    expect(out).toContain('推定scaleのNCC=0.9100');
-    expect(out).toContain('推定=1.018');
+    expect(out).toContain('適用scaleのNCC=0.9100');
+    expect(out).toContain('出所=粗探索の最良値');
+    expect(out).toContain('粗最良 scale=1.018');
+    expect(out).toContain('粗探索NCC上位');
+    expect(out).toContain('ピークの鋭さ=0.0080');
+    expect(out).toContain('撮影順: 背景→ぬい');
     expect(out).toContain('--- JSON ---');
     expect(out).not.toMatch(/file:\/\//);
     expect(out).not.toMatch(/VisionCamera/);

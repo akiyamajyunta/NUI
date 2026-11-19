@@ -20,9 +20,13 @@ export type ClosedLoopRetryReport = {
 
 export type FocusABeforeShotReport = {
   executed: boolean;
-  reason: 'forced' | 'not_background' | 'stale' | 'fresh';
+  reason: 'forced' | 'not_shot1_target' | 'not_background' | 'stale' | 'fresh';
   lastFocusTarget: 'subject' | 'background' | 'none';
   elapsedSinceFocusMs: number;
+  /** 撮影1のフォーカス対象 */
+  shot1Target?: 'subject' | 'background';
+  /** fresh 判定の許容時間（ms） */
+  focusFreshMaxMs?: number;
 };
 
 export type HoldBackgroundFocusSessionStats = {
@@ -44,6 +48,10 @@ export type CaptureResult = {
 
 export type ScaleCorrectionMode = 'off' | 'estimate' | 'fixed';
 
+export type ScaleNccSample = { scale: number; ncc: number };
+
+export type ScaleEstimateSource = 'coarse' | 'fine' | 'recent' | 'fixed';
+
 export type ScaleCorrectionReport = {
   mode: ScaleCorrectionMode;
   estimatedScale: number;
@@ -54,8 +62,26 @@ export type ScaleCorrectionReport = {
   nccAfter: number;
   fellBack: boolean;
   minGain: number;
+  /** 精密探索の長辺 */
   analysisLongSide: number;
+  coarseLongSide: number;
   ms: number;
+  coarseMs: number;
+  fineMs: number;
+  /** 粗探索 NCC 上位（最大5点） */
+  coarseTopNcc: ScaleNccSample[];
+  peakSharpness: number;
+  peakSharpnessMin: number;
+  scaleSource: ScaleEstimateSource;
+  /** 範囲外等で精密探索しなかった */
+  fineSkipped: boolean;
+  coarseBestScale: number;
+  coarseBestNcc: number;
+  fineBestScale: number | null;
+  fineBestNcc: number | null;
+  adoptMin: number;
+  adoptMax: number;
+  fineAdoptMinNcc: number;
 };
 
 export type FusionParams = {
@@ -73,6 +99,10 @@ export type FusionParams = {
   scaleFixed: number;
   /** 推定 NCC の改善がこれ未満なら scale=1。既定 0.001 */
   scaleMinGain: number;
+  /** 粗最良 scale の採用下限（これ未満ならフォールバック）。既定 1.0 */
+  scaleAdoptMin: number;
+  /** 粗最良 scale の採用上限（これ超ならフォールバック）。既定 1.08 */
+  scaleAdoptMax: number;
 };
 
 export type FusionTimings = {

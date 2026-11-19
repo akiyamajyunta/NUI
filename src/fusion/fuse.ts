@@ -6,9 +6,8 @@ import {
   type SkShader,
 } from '@shopify/react-native-skia';
 import type { FusionParams, FusionResult, MaskDiagnostics, NormalizedPoint, ScaleCorrectionReport } from '@/types';
-import { DISPLAY_BUFFER, displayNormalizedToBufferNormalized } from '@/imaging/displayPoint';
 import { loadImage } from '@/imaging/loadImage';
-import { resizeSkImage, imageShaderBilinear } from '@/imaging/downscale';
+import { resizeSkImage, imageShaderBilinear, imageShaderForFar } from '@/imaging/downscale';
 import { fitLongSide } from '@/imaging/fitLongSide';
 import { fusionPixelSize } from '@/imaging/fusionOutputSize';
 import { encodeToCacheJpeg } from '@/imaging/saveImage';
@@ -19,8 +18,14 @@ import { buildSharpnessMap, blurSingleChannel, windowRadiusToSigma } from '@/fus
 import {
   boxBlurGray,
   estimateAppliedScale,
+  finalizeScaleEstimate,
+  runCoarseScaleSearch,
+  SCALE_ADOPT_MAX_DEFAULT,
+  SCALE_ADOPT_MIN_DEFAULT,
   SCALE_DIAG_BLUR_RADIUS_PX,
+  SCALE_COARSE_LONG_SIDE,
   SCALE_ESTIMATE_LONG_SIDE,
+  SCALE_FINE_ADOPT_MIN_NCC,
   SCALE_MIN_GAIN,
 } from '@/perf/alignScaleDiagnosticCore';
 import { effectiveThreshold, maskDiagnosticsFromEncoded } from '@/fusion/maskCore';
@@ -174,7 +179,7 @@ function blendImages(
     ],
     [
       imageShaderBilinear(near, w, h),
-      imageShaderBilinear(far, w, h),
+      imageShaderForFar(far, farScale),
       imageShaderBilinear(mask, mw, mh),
     ],
   );
@@ -242,31 +247,87 @@ export async function fuse(
     fellBack: false,
     minGain: params.scaleMinGain ?? SCALE_MIN_GAIN,
     analysisLongSide: SCALE_ESTIMATE_LONG_SIDE,
+    coarseLongSide: SCALE_COARSE_LONG_SIDE,
     ms: 0,
+    coarseMs: 0,
+    fineMs: 0,
+    coarseTopNcc: [],
+    peakSharpness: 0,
+    peakSharpnessMin: 0.005,
+    scaleSource: 'fixed',
+    fineSkipped: false,
+    coarseBestScale: 1,
+    coarseBestNcc: 0,
+    fineBestScale: null,
+    fineBestNcc: null,
+    adoptMin: SCALE_ADOPT_MIN_DEFAULT,
+    adoptMax: SCALE_ADOPT_MAX_DEFAULT,
+    fineAdoptMinNcc: SCALE_FINE_ADOPT_MIN_NCC,
   };
   if (scaleCorrection.mode !== 'off') {
     onProgress?.('拡大率');
-    const { width: aw, height: ah } = fitLongSide(outW, outH, SCALE_ESTIMATE_LONG_SIDE);
-    let grayNear = readGrayFromSkImage(nearImg, SCALE_ESTIMATE_LONG_SIDE);
-    let grayFar = readGrayFromSkImage(farImg, SCALE_ESTIMATE_LONG_SIDE);
-    grayNear = boxBlurGray(grayNear, aw, ah, SCALE_DIAG_BLUR_RADIUS_PX);
-    grayFar = boxBlurGray(grayFar, aw, ah, SCALE_DIAG_BLUR_RADIUS_PX);
-    const subject = displayNormalizedToBufferNormalized(
-      options?.subjectPoint ?? { x: 0.5, y: 0.45 },
-      aw,
-      ah,
-      DISPLAY_BUFFER,
-    );
-    const est = estimateAppliedScale(
-      grayNear,
-      grayFar,
-      aw,
-      ah,
-      subject,
-      scaleCorrection.mode,
-      params.scaleFixed ?? 1,
-      params.scaleMinGain ?? SCALE_MIN_GAIN,
-    );
+    const subjectDisplay = options?.subjectPoint ?? { x: 0.5, y: 0.45 };
+    const coarseSize = fitLongSide(outW, outH, SCALE_COARSE_LONG_SIDE);
+    let grayNearC = readGrayFromSkImage(nearImg, SCALE_COARSE_LONG_SIDE);
+    let grayFarC = readGrayFromSkImage(farImg, SCALE_COARSE_LONG_SIDE);
+    grayNearC = boxBlurGray(grayNearC, coarseSize.width, coarseSize.height, SCALE_DIAG_BLUR_RADIUS_PX);
+    grayFarC = boxBlurGray(grayFarC, coarseSize.width, coarseSize.height, SCALE_DIAG_BLUR_RADIUS_PX);
+    const coarsePair = {
+      grayNear: grayNearC,
+      grayFar: grayFarC,
+      w: coarseSize.width,
+      h: coarseSize.height,
+    };
+    const tScale = performance.now();
+    const fixedScale = params.scaleFixed;
+    const minGain = params.scaleMinGain ?? SCALE_MIN_GAIN;
+    const adoptMin = params.scaleAdoptMin ?? SCALE_ADOPT_MIN_DEFAULT;
+    const adoptMax = params.scaleAdoptMax ?? SCALE_ADOPT_MAX_DEFAULT;
+    const finalizeOpts = {
+      adoptMin,
+      adoptMax,
+      fixedScale,
+      fineAdoptMinNcc: SCALE_FINE_ADOPT_MIN_NCC,
+      minGain,
+    };
+    let est;
+    if (scaleCorrection.mode === 'estimate') {
+      const coarseResult = runCoarseScaleSearch(coarsePair, subjectDisplay);
+      let finePair: typeof coarsePair | null = null;
+      if (
+        coarseResult.coarseBest.scale >= adoptMin &&
+        coarseResult.coarseBest.scale <= adoptMax
+      ) {
+        const fineSize = fitLongSide(outW, outH, SCALE_ESTIMATE_LONG_SIDE);
+        let grayNearF = readGrayFromSkImage(nearImg, SCALE_ESTIMATE_LONG_SIDE);
+        let grayFarF = readGrayFromSkImage(farImg, SCALE_ESTIMATE_LONG_SIDE);
+        grayNearF = boxBlurGray(grayNearF, fineSize.width, fineSize.height, SCALE_DIAG_BLUR_RADIUS_PX);
+        grayFarF = boxBlurGray(grayFarF, fineSize.width, fineSize.height, SCALE_DIAG_BLUR_RADIUS_PX);
+        finePair = {
+          grayNear: grayNearF,
+          grayFar: grayFarF,
+          w: fineSize.width,
+          h: fineSize.height,
+        };
+      }
+      est = finalizeScaleEstimate(
+        coarseResult,
+        coarsePair,
+        finePair,
+        subjectDisplay,
+        finalizeOpts,
+        tScale,
+      );
+    } else {
+      est = estimateAppliedScale(
+        coarsePair,
+        null,
+        subjectDisplay,
+        scaleCorrection.mode,
+        fixedScale,
+        minGain,
+      );
+    }
     scaleCorrection = { mode: scaleCorrection.mode, ...est };
     alignMs = est.ms;
   }
