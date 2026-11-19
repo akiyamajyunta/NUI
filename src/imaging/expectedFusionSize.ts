@@ -1,6 +1,13 @@
-import { MAX_TEXTURE_LONG_SIDE } from '@/config/constants';
-import { fitLongSide } from '@/imaging/downscale';
 import { loadImage } from '@/imaging/loadImage';
+import { fusionPixelSize } from '@/imaging/fusionOutputSize';
+
+/** 保存フル解像度。Skia 適用後の寸法を、向きでは入れ替えない */
+export function fullFusionOutputSize(
+  width: number,
+  height: number,
+): { width: number; height: number } {
+  return fusionPixelSize(width, height);
+}
 
 /** 保存（exportFullFusionToCache）と同じフル解像度出力の寸法 */
 export async function expectedFullFusionOutputSize(
@@ -9,14 +16,9 @@ export async function expectedFullFusionOutputSize(
   nearOrientation?: unknown,
   farOrientation?: unknown,
 ): Promise<{ width: number; height: number }> {
-  const [near, far] = await Promise.all([
-    loadImage(nearUri, nearOrientation),
-    loadImage(farUri, farOrientation),
-  ]);
-  if (near.orientation !== far.orientation) {
-    throw new Error('2枚の向きが一致しません');
-  }
-  const outW = near.width;
-  const outH = near.height;
-  return fitLongSide(outW, outH, Math.min(Math.max(outW, outH), MAX_TEXTURE_LONG_SIDE));
+  const near = await loadImage(nearUri);
+  void farUri;
+  void nearOrientation;
+  void farOrientation;
+  return fullFusionOutputSize(near.width, near.height);
 }

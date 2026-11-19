@@ -6,13 +6,20 @@ import { PrimaryButton } from '@/ui/PrimaryButton';
 import { MetricRow } from '@/ui/MetricRow';
 import { S } from '@/ui/strings';
 
+/** ホーム上部に出す。JS を端末へ載せたときにここが変わる */
+const APP_DISPLAY_VERSION = '1119-3';
+
 export default function HomeScreen() {
   const { device, supportsFocus } = useCameraSetup();
 
   return (
     <>
-      <Stack.Screen options={{ title: S.appTitle }} />
+      <Stack.Screen options={{ title: `${S.appTitle} ${APP_DISPLAY_VERSION}` }} />
       <ScrollView style={styles.scroll} contentContainerStyle={styles.container}>
+        <View style={styles.versionBanner}>
+          <Text style={styles.versionLabel}>表示バージョン</Text>
+          <Text style={styles.versionValue}>{APP_DISPLAY_VERSION}</Text>
+        </View>
         <View style={styles.skiaBox}>
           <Canvas style={{ width: 120, height: 80 }}>
             <Fill color="#1a1a2e" />
@@ -52,6 +59,16 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   scroll: { flex: 1, backgroundColor: '#111' },
   container: { padding: 20, gap: 4 },
+  versionBanner: {
+    backgroundColor: '#3d7eff',
+    borderRadius: 8,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    marginBottom: 16,
+    alignItems: 'center',
+  },
+  versionLabel: { color: '#d6e4ff', fontSize: 13 },
+  versionValue: { color: '#fff', fontSize: 28, fontWeight: '800', marginTop: 2 },
   skiaBox: { alignItems: 'center', marginBottom: 16 },
   skiaHint: { color: '#888', fontSize: 12, marginTop: 8 },
   btnGap: { marginTop: 10 },

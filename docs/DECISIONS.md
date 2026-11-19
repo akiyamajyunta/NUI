@@ -38,7 +38,14 @@
 - ピント検証は 512px グレースケール上のラプラシアン比（`FOCUS_VERIFY_K=1.15`）。
 - ネイティブでのレンズ位置直接指定は行わない（将来案として 03 に記載のとおり）。
 - 撮影順序は **FAR（背景）→ NEAR（ぬい）**。最後に背景点をタップした状態でシャッターを押す操作と一致させる（`photoA`=FAR, `photoB`=NEAR）。
-- ピント検証は診断の画質比較と同じ **長辺512px・領域15%・ラプラシアン分散**（`FOCUS_VERIFY_LONG_SIDE`）。Vision Camera の `left`/`right` は `orientationToDegrees` で回転し、座標の x/y 入替えは行わない（画像を上向きにしてからプレビューと同じ正規化座標を使う）。
+- ピント検証は診断の画質比較と同じ **長辺512px・領域15%・ラプラシアン分散**（`FOCUS_VERIFY_LONG_SIDE`）。点は表示向きの正規化座標のまま使う。
+
+## 画像の向き（実測 2026-11-19）
+
+- Skia の `MakeImageFromEncoded` は EXIF を適用し、表示向きの画素と寸法を返す。縦持ちの撮影 JPEG（格納画素 1920×1440、EXIF 6）は読み込み直後 1440×1920 になる。
+- `fuse` はこの画素に `bakeOrientation` を重ねない。保存フルは 1440×1920（EXIF なしの縦画素）、プレビュー長辺 1024 は 768×1024。`left`/`right` から回転角を求めて画素や点を回さない。
+- ギャラリー選択（`expo-image-picker`）も同じ読み込みに任せる。EXIF が無い画像と EXIF が 1（正位置）の画像は、格納画素の寸法のまま出す。
+- 診断の「保存時フル解像度」は、この出力寸法（`fusionPixelSize`）と一致させる。Vision Camera の `PhotoFile.width/height` は EXIF の ImageWidth（回転前、1920×1440）であり、Skia の寸法とは別である。
 
 ## マスクぼかし
 

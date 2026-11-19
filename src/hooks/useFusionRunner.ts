@@ -21,6 +21,8 @@ export function useFusionRunner(
   // `extra` は呼び出し側で毎レンダー新しいオブジェクトになるため、値だけを依存に使う
   const referenceUriForPsnr = extra?.referenceUriForPsnr;
   const manualMaskUri = state.manualMaskUri;
+  const subjectPoint = state.fusionSource?.nearPoint;
+  const imageOrientation = state.fusionSource?.nearOrientation;
 
   const run = useCallback(async () => {
     if (!nearUri || !farUri) return;
@@ -41,6 +43,8 @@ export function useFusionRunner(
         saveDebug: true,
         referenceUriForPsnr,
         manualMask,
+        subjectPoint,
+        orientation: imageOrientation,
       });
       if (id === runId.current) {
         setResult(fr);
@@ -53,7 +57,17 @@ export function useFusionRunner(
     } finally {
       if (id === runId.current) setRunning(false);
     }
-  }, [nearUri, farUri, params, previewOnly, referenceUriForPsnr, manualMaskUri, dispatch]);
+  }, [
+    nearUri,
+    farUri,
+    params,
+    previewOnly,
+    referenceUriForPsnr,
+    manualMaskUri,
+    subjectPoint,
+    imageOrientation,
+    dispatch,
+  ]);
 
   useEffect(() => {
     const t = setTimeout(() => {

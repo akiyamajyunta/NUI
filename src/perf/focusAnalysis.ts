@@ -1,4 +1,5 @@
 import { FOCUS_VERIFY_LONG_SIDE } from '@/config/constants';
+import { DISPLAY_BUFFER } from '@/imaging/displayPoint';
 import { fitLongSide } from '@/imaging/downscale';
 import { loadImage } from '@/imaging/loadImage';
 import { readGrayFromSkImage } from '@/imaging/imagePixels';
@@ -22,10 +23,14 @@ export async function runFocusAnalysis(input: FocusAnalysisInput): Promise<{
   analysisWidth: number;
   analysisHeight: number;
 }> {
+  // Skia は EXIF を適用して表示向き（縦）で返す。点は display のまま使う。
   const [nearLoaded, farLoaded] = await Promise.all([
-    loadImage(input.nearUri, input.nearOrientation),
-    loadImage(input.farUri, input.farOrientation),
+    loadImage(input.nearUri),
+    loadImage(input.farUri),
   ]);
+  void input.nearOrientation;
+  void input.farOrientation;
+  const space = DISPLAY_BUFFER;
   const { width: w, height: h } = fitLongSide(
     nearLoaded.width,
     nearLoaded.height,
@@ -33,7 +38,25 @@ export async function runFocusAnalysis(input: FocusAnalysisInput): Promise<{
   );
   const gn = readGrayFromSkImage(nearLoaded.image, FOCUS_VERIFY_LONG_SIDE);
   const gf = readGrayFromSkImage(farLoaded.image, FOCUS_VERIFY_LONG_SIDE);
-  const table = focusSharpnessTableFromGray(gn, gf, w, h, input.nearPoint, input.farPoint);
-  const verify = verifyFocusFromGray(gn, gf, w, h, input.nearPoint, input.farPoint);
+  const table = focusSharpnessTableFromGray(
+    gn,
+    gf,
+    w,
+    h,
+    input.nearPoint,
+    input.farPoint,
+    undefined,
+    space,
+  );
+  const verify = verifyFocusFromGray(
+    gn,
+    gf,
+    w,
+    h,
+    input.nearPoint,
+    input.farPoint,
+    undefined,
+    space,
+  );
   return { verify, table, analysisWidth: w, analysisHeight: h };
 }

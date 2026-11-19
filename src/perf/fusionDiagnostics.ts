@@ -1,6 +1,7 @@
 import { AlphaType, ColorType, type SkImage } from '@shopify/react-native-skia';
 import { FOCUS_VERIFY_LONG_SIDE } from '@/config/constants';
-import { laplacianVarianceAtPoint } from '@/perf/fusionDiagnosticsCore';
+import { DISPLAY_BUFFER, type PixelBufferSpace } from '@/imaging/displayPoint';
+import { laplacianVarianceAtPoint, maskMidFractions } from '@/perf/fusionDiagnosticsCore';
 import {
   analysisPointCoords,
   laplacianVarianceGrid4x4,
@@ -12,6 +13,12 @@ import { loadImage } from '@/imaging/loadImage';
 import type { NormalizedPoint } from '@/types';
 
 export { laplacianVarianceAtPoint } from '@/perf/fusionDiagnosticsCore';
+
+/** 合成JPEGも Skia 適用済みの表示向き。left/right では回さない */
+export function fusedOutputBufferSpace(orientation?: unknown): PixelBufferSpace {
+  void orientation;
+  return DISPLAY_BUFFER;
+}
 
 export type SharpnessTriple = { near: number; far: number; fused: number };
 
@@ -43,22 +50,41 @@ export async function computeQualityTable(
   orientations?: { near?: unknown; far?: unknown },
 ): Promise<FusionQualityTable> {
   const [nearL, farL, fusedL] = await Promise.all([
-    loadImage(nearUri, orientations?.near),
-    loadImage(farUri, orientations?.far),
-    loadImage(fusedUri, orientations?.near),
+    loadImage(nearUri),
+    loadImage(farUri),
+    loadImage(fusedUri),
   ]);
-  const { width: w, height: h } = fitLongSide(nearL.width, nearL.height, FOCUS_VERIFY_LONG_SIDE);
+  const nearSize = fitLongSide(nearL.width, nearL.height, FOCUS_VERIFY_LONG_SIDE);
+  const farSize = fitLongSide(farL.width, farL.height, FOCUS_VERIFY_LONG_SIDE);
+  const fusedSize = fitLongSide(fusedL.width, fusedL.height, FOCUS_VERIFY_LONG_SIDE);
   const gn = readGrayFromSkImage(nearL.image, FOCUS_VERIFY_LONG_SIDE);
   const gf = readGrayFromSkImage(farL.image, FOCUS_VERIFY_LONG_SIDE);
   const gout = readGrayFromSkImage(fusedL.image, FOCUS_VERIFY_LONG_SIDE);
-  const atPoint = (point: NormalizedPoint): SharpnessTriple => ({
-    near: laplacianVarianceAtPoint(gn, w, h, point),
-    far: laplacianVarianceAtPoint(gf, w, h, point),
-    fused: laplacianVarianceAtPoint(gout, w, h, point),
+  const nearSpace = DISPLAY_BUFFER;
+  const farSpace = DISPLAY_BUFFER;
+  const fusedSpace = fusedOutputBufferSpace(orientations?.near ?? orientations?.far);
+  const atPoint = (point: NormalizedPoint, nearFarSpace: PixelBufferSpace): SharpnessTriple => ({
+    near: laplacianVarianceAtPoint(
+      gn,
+      nearSize.width,
+      nearSize.height,
+      point,
+      undefined,
+      nearFarSpace,
+    ),
+    far: laplacianVarianceAtPoint(gf, farSize.width, farSize.height, point, undefined, nearFarSpace),
+    fused: laplacianVarianceAtPoint(
+      gout,
+      fusedSize.width,
+      fusedSize.height,
+      point,
+      undefined,
+      fusedSpace,
+    ),
   });
   return {
-    atSubjectPoint: atPoint(nearPoint),
-    atBackgroundPoint: atPoint(farPoint),
+    atSubjectPoint: atPoint(nearPoint, nearSpace),
+    atBackgroundPoint: atPoint(farPoint, farSpace),
   };
 }
 
@@ -69,16 +95,14 @@ export async function computeDiagnosticPointLayout(
   farPoint: NormalizedPoint,
   orientations?: { near?: unknown; far?: unknown },
 ): Promise<DiagnosticPointLayout> {
-  const [nearL, farL] = await Promise.all([
-    loadImage(nearUri, orientations?.near),
-    loadImage(farUri, orientations?.far),
-  ]);
+  void orientations;
+  const [nearL, farL] = await Promise.all([loadImage(nearUri), loadImage(farUri)]);
   const { width: w, height: h } = fitLongSide(nearL.width, nearL.height, FOCUS_VERIFY_LONG_SIDE);
   const gn = readGrayFromSkImage(nearL.image, FOCUS_VERIFY_LONG_SIDE);
   const gf = readGrayFromSkImage(farL.image, FOCUS_VERIFY_LONG_SIDE);
   return {
-    subject: analysisPointCoords(nearPoint, w, h),
-    background: analysisPointCoords(farPoint, w, h),
+    subject: analysisPointCoords(nearPoint, w, h, DISPLAY_BUFFER),
+    background: analysisPointCoords(farPoint, w, h, DISPLAY_BUFFER),
     grids: {
       analysisSize: { width: w, height: h },
       near: laplacianVarianceGrid4x4(gn, w, h),
@@ -92,9 +116,17 @@ export type MaskBucketStats = {
   mid: number;
   above09: number;
   sampleCount: number;
+  /** 被写体周辺の混合率。点が無いときは null */
+  midAtSubject: number | null;
+  /** 背景周辺の混合率。点が無いときは null */
+  midAtBackground: number | null;
 };
 
-export function maskBucketStatsFromImage(mask: SkImage): MaskBucketStats {
+export function maskBucketStatsFromImage(
+  mask: SkImage,
+  subject?: NormalizedPoint,
+  background?: NormalizedPoint,
+): MaskBucketStats {
   const w = mask.width();
   const h = mask.height();
   const rgba = mask.readPixels(0, 0, {
@@ -104,27 +136,39 @@ export function maskBucketStatsFromImage(mask: SkImage): MaskBucketStats {
     alphaType: AlphaType.Unpremul,
   });
   if (!rgba) {
-    return { below01: 0, mid: 0, above09: 0, sampleCount: 0 };
+    return {
+      below01: 0,
+      mid: 0,
+      above09: 0,
+      sampleCount: 0,
+      midAtSubject: null,
+      midAtBackground: null,
+    };
   }
   let b0 = 0;
-  let b1 = 0;
   let b2 = 0;
   const n = w * h;
   for (let i = 0; i < n; i += 1) {
     const m = rgba[i * 4] / 255;
     if (m < 0.1) b0 += 1;
-    else if (m <= 0.9) b1 += 1;
-    else b2 += 1;
+    else if (m > 0.9) b2 += 1;
   }
+  const mix = maskMidFractions(rgba, w, h, subject, background, DISPLAY_BUFFER);
   return {
     below01: b0 / n,
-    mid: b1 / n,
+    mid: mix.overall,
     above09: b2 / n,
     sampleCount: n,
+    midAtSubject: mix.subject,
+    midAtBackground: mix.background,
   };
 }
 
-export async function maskBucketStatsFromUri(maskUri: string): Promise<MaskBucketStats> {
+export async function maskBucketStatsFromUri(
+  maskUri: string,
+  subject?: NormalizedPoint,
+  background?: NormalizedPoint,
+): Promise<MaskBucketStats> {
   const loaded = await loadImage(maskUri);
-  return maskBucketStatsFromImage(loaded.image);
+  return maskBucketStatsFromImage(loaded.image, subject, background);
 }

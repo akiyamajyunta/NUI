@@ -26,6 +26,8 @@ type Props = {
   farPoint?: NormalizedPoint;
   captureWidth?: number;
   captureHeight?: number;
+  nearOrientation?: unknown;
+  farOrientation?: unknown;
   maskUri?: string;
   previewLongSide: number;
   referenceUriForPsnr?: string;
@@ -79,8 +81,13 @@ export function ResultDiagnosticsPanel(props: Props) {
     void (async () => {
       try {
         const [q, m] = await Promise.all([
-          computeQualityTable(props.nearUri, props.farUri, fusedUri, nearPt, farPt),
-          props.maskUri ? maskBucketStatsFromUri(props.maskUri) : Promise.resolve(null),
+          computeQualityTable(props.nearUri, props.farUri, fusedUri, nearPt, farPt, {
+            near: props.nearOrientation,
+            far: props.farOrientation,
+          }),
+          props.maskUri
+            ? maskBucketStatsFromUri(props.maskUri, nearPt, farPt)
+            : Promise.resolve(null),
         ]);
         if (alive) {
           setQuality(q);
@@ -94,7 +101,16 @@ export function ResultDiagnosticsPanel(props: Props) {
     return () => {
       alive = false;
     };
-  }, [props.nearUri, props.farUri, props.fusedUri, props.maskUri, nearPt, farPt]);
+  }, [
+    props.nearUri,
+    props.farUri,
+    props.fusedUri,
+    props.maskUri,
+    props.nearOrientation,
+    props.farOrientation,
+    nearPt,
+    farPt,
+  ]);
 
   const runPassthrough = async (forceMask: 'near' | 'far') => {
     props.onSaveBusy(true);
@@ -106,6 +122,8 @@ export function ResultDiagnosticsPanel(props: Props) {
         params: props.params,
         referenceUriForPsnr: props.referenceUriForPsnr,
         forceMask,
+        subjectPoint: nearPt,
+        orientation: props.nearOrientation,
       });
       await loadImage(cacheUri);
       const dest = await saveCacheUriToGallery(cacheUri);
@@ -178,7 +196,21 @@ export function ResultDiagnosticsPanel(props: Props) {
       {maskStats ? (
         <>
           <MetricRow label="&lt;0.1（FAR寄り）" value={`${(maskStats.below01 * 100).toFixed(1)}%`} />
-          <MetricRow label="0.1〜0.9（混合）" value={`${(maskStats.mid * 100).toFixed(1)}%`} />
+          <MetricRow label="0.1〜0.9（混合・全体）" value={`${(maskStats.mid * 100).toFixed(1)}%`} />
+          <MetricRow
+            label="混合・被写体周辺"
+            value={
+              maskStats.midAtSubject != null ? `${(maskStats.midAtSubject * 100).toFixed(1)}%` : '—'
+            }
+          />
+          <MetricRow
+            label="混合・背景周辺"
+            value={
+              maskStats.midAtBackground != null
+                ? `${(maskStats.midAtBackground * 100).toFixed(1)}%`
+                : '—'
+            }
+          />
           <MetricRow label="&gt;0.9（NEAR寄り）" value={`${(maskStats.above09 * 100).toFixed(1)}%`} />
           <MetricRow label="サンプル数" value={String(maskStats.sampleCount)} />
         </>

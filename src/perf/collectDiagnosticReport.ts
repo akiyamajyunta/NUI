@@ -13,6 +13,7 @@ import {
 import { expectedFullFusionOutputSize } from '@/imaging/expectedFusionSize';
 import type { FocusVerifyResult } from '@/perf/focusVerify';
 import { describeAlignSearchCost, formatAlignSubpixelNote } from '@/perf/alignInvestigation';
+import { DISPLAY_BUFFER } from '@/imaging/displayPoint';
 import { measureBackgroundEdgeScale } from '@/perf/alignScaleDiagnostic';
 import { captureSegments } from '@/perf/timelineSegments';
 import type {
@@ -48,6 +49,8 @@ export type CollectDiagnosticOpts = {
   focusABeforeShot?: FocusABeforeShotReport;
   holdBackgroundFocus?: HoldBackgroundFocusSessionStats;
   includePassthrough: boolean;
+  /** 診断の scale×平行移動。既定では実行しない */
+  scaleJointSearch?: boolean;
 };
 
 async function measurePassthrough(
@@ -61,6 +64,8 @@ async function measurePassthrough(
     params: opts.params,
     nearOrientation: opts.nearOrientation,
     farOrientation: opts.farOrientation,
+    subjectPoint: opts.nearPoint,
+    orientation: opts.nearOrientation,
   };
   const [nearPtUri, farPtUri] = await Promise.all([
     exportFullFusionToCache({ ...base, forceMask: 'near' }),
@@ -78,9 +83,21 @@ export async function collectDiagnosticReportData(
   opts: CollectDiagnosticOpts,
 ): Promise<DiagnosticReportData> {
   const orient = { near: opts.nearOrientation, far: opts.farOrientation };
+  const alignScaleProbePromise = opts.scaleJointSearch
+    ? measureBackgroundEdgeScale(
+        opts.nearUri,
+        opts.farUri,
+        opts.nearPoint,
+        undefined,
+        DISPLAY_BUFFER,
+        true,
+      ).catch(() => null)
+    : Promise.resolve(null);
   const [quality, mask, outputFull, pointLayout, alignScaleProbe] = await Promise.all([
     computeQualityTable(opts.nearUri, opts.farUri, opts.fusedUri, opts.nearPoint, opts.farPoint, orient),
-    opts.maskUri ? maskBucketStatsFromUri(opts.maskUri) : Promise.resolve(null as MaskBucketStats | null),
+    opts.maskUri
+      ? maskBucketStatsFromUri(opts.maskUri, opts.nearPoint, opts.farPoint)
+      : Promise.resolve(null as MaskBucketStats | null),
     expectedFullFusionOutputSize(
       opts.nearUri,
       opts.farUri,
@@ -94,7 +111,7 @@ export async function collectDiagnosticReportData(
       opts.farPoint,
       orient,
     ),
-    measureBackgroundEdgeScale(opts.nearUri, opts.farUri, opts.nearPoint).catch(() => null),
+    alignScaleProbePromise,
   ]);
   const segments =
     opts.captureTimeline && opts.captureTimeline.length > 0
@@ -142,5 +159,6 @@ export async function collectDiagnosticReportData(
     timings: opts.result.timings,
     passthrough,
     alignScaleProbe,
+    scaleCorrection: opts.result.scaleCorrection ?? null,
   };
 }

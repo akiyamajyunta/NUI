@@ -79,6 +79,9 @@ export const DEFAULT_FUSION_PARAMS: FusionParams = {
   haloShrink: 0,
   colorMatch: true,
   align: false,
+  scaleMode: 'estimate',
+  scaleFixed: 1,
+  scaleMinGain: 0.001,
 };
 
 export const PREVIEW_FUSION_LONG_SIDE = 1024;
@@ -104,6 +107,8 @@ export type CaptureSettings = {
   closedLoopCapture: boolean;
   /** プレビュー中、背景点へ定期的に focus 再指定（実験） */
   holdBackgroundFocus: boolean;
+  /** 診断の scale×平行移動同時探索（重い）。既定オフ */
+  scaleJointSearch: boolean;
 };
 
 export const DEFAULT_CAPTURE_SETTINGS: CaptureSettings = {
@@ -119,4 +124,5 @@ export const DEFAULT_CAPTURE_SETTINGS: CaptureSettings = {
   focusSettleMs: 0,
   closedLoopCapture: false,
   holdBackgroundFocus: false,
+  scaleJointSearch: false,
 };

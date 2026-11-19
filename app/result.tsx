@@ -1,6 +1,7 @@
 import { router, Stack } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildAlignEdgeOverlayUri } from '@/perf/alignEdgeOverlay';
+import { scaledFarPreviewUri } from '@/imaging/scaledFarPreview';
 import {
   Image,
   Pressable,
@@ -60,6 +61,8 @@ export default function ResultScreen() {
   const [passthroughReport, setPassthroughReport] = useState<PassthroughSharpnessReport | null>(null);
   const [notice, setNotice] = useState('');
   const [blinkShowNear, setBlinkShowNear] = useState(true);
+  const [blinkScaleApplied, setBlinkScaleApplied] = useState(false);
+  const [scaledFarUri, setScaledFarUri] = useState<string | null>(null);
   const [edgeAlignApplied, setEdgeAlignApplied] = useState(false);
   const [edgeOverlayUri, setEdgeOverlayUri] = useState<string | null>(null);
   const [edgeOverlayBusy, setEdgeOverlayBusy] = useState(false);
@@ -96,11 +99,21 @@ export default function ResultScreen() {
       closedLoop: state.captureResult?.closedLoop,
       focusABeforeShot: state.captureResult?.focusABeforeShot,
       holdBackgroundFocus: state.captureResult?.holdBackgroundFocus,
+      scaleJointSearch: state.captureSettings.scaleJointSearch,
       nearOrientation: source.nearOrientation,
       farOrientation: source.farOrientation,
       includePassthrough: true,
     };
-  }, [farUri, nearUri, params, result, source, state.captureResult, state.lastFocusVerify]);
+  }, [
+    farUri,
+    nearUri,
+    params,
+    result,
+    source,
+    state.captureResult,
+    state.captureSettings.scaleJointSearch,
+    state.lastFocusVerify,
+  ]);
 
   const onCopyDiagnostics = useCallback(async () => {
     const opts = buildDiagnosticOpts();
@@ -153,6 +166,27 @@ export default function ResultScreen() {
     return () => clearInterval(id);
   }, [viewMode, nearUri, farUri]);
 
+  const blinkFarScale = result?.scaleCorrection?.appliedScale ?? 1;
+  useEffect(() => {
+    if (viewMode !== 'blink' || !blinkScaleApplied || Math.abs(blinkFarScale - 1) < 1e-4) {
+      return undefined;
+    }
+    const far = result?.debug?.farUri ?? farUri;
+    if (!far) return undefined;
+    let alive = true;
+    void (async () => {
+      try {
+        const uri = await scaledFarPreviewUri(far, blinkFarScale);
+        if (alive) setScaledFarUri(uri);
+      } catch {
+        if (alive) setScaledFarUri(null);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [blinkFarScale, blinkScaleApplied, farUri, result?.debug?.farUri, viewMode]);
+
   useEffect(() => {
     if (viewMode !== 'edgeOverlay' || !nearUri || !farUri) return undefined;
     let alive = true;
@@ -182,6 +216,7 @@ export default function ResultScreen() {
   const previewUri = useMemo(() => {
     if (viewMode === 'blink') {
       if (blinkShowNear) return result?.debug?.nearUri ?? nearUri ?? null;
+      if (blinkScaleApplied && scaledFarUri) return scaledFarUri;
       return result?.debug?.farUri ?? farUri ?? null;
     }
     if (viewMode === 'edgeOverlay') return edgeOverlayUri;
@@ -202,7 +237,7 @@ export default function ResultScreen() {
       default:
         return result.imageUri;
     }
-  }, [blinkShowNear, edgeOverlayUri, farUri, nearUri, result, viewMode]);
+  }, [blinkScaleApplied, blinkShowNear, edgeOverlayUri, farUri, nearUri, result, scaledFarUri, viewMode]);
 
   const patch = useCallback(
     (p: Partial<typeof params>) => {
@@ -228,6 +263,8 @@ export default function ResultScreen() {
         params,
         manualMask,
         referenceUriForPsnr: refPsnr,
+        subjectPoint: source?.nearPoint,
+        orientation: source?.nearOrientation,
       });
       await loadImage(cacheUri);
       const dest = await saveCacheUriToGallery(cacheUri);
@@ -295,7 +332,15 @@ export default function ResultScreen() {
           </View>
         ) : null}
         {__DEV__ && viewMode === 'blink' ? (
-          <Text style={styles.hintDev}>0.5秒ごとに NEAR / FAR を自動切替（赤=NEAR・点滅は原画）</Text>
+          <View style={styles.switchRow}>
+            <Text style={styles.switchLabel}>
+              {blinkScaleApplied ? 'FARは拡大率補正後' : 'FARは補正前'}
+            </Text>
+            <Switch value={blinkScaleApplied} onValueChange={setBlinkScaleApplied} />
+          </View>
+        ) : null}
+        {__DEV__ && viewMode === 'blink' ? (
+          <Text style={styles.hintDev}>0.5秒ごとに NEAR / FAR を自動切替</Text>
         ) : null}
         {__DEV__ && viewMode === 'edgeOverlay' ? (
           <Text style={styles.hintDev}>赤=NEARエッジ / 青=FARエッジ（Sobel勾配、長辺256px）</Text>
@@ -397,6 +442,8 @@ export default function ResultScreen() {
             farPoint={source.farPoint}
             captureWidth={source.captureWidth}
             captureHeight={source.captureHeight}
+            nearOrientation={source.nearOrientation}
+            farOrientation={source.farOrientation}
             maskUri={result?.debug?.maskUri}
             referenceUriForPsnr={refPsnr}
             previewLongSide={PREVIEW_FUSION_LONG_SIDE}

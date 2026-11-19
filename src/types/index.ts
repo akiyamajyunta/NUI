@@ -42,6 +42,22 @@ export type CaptureResult = {
   holdBackgroundFocus?: HoldBackgroundFocusSessionStats;
 };
 
+export type ScaleCorrectionMode = 'off' | 'estimate' | 'fixed';
+
+export type ScaleCorrectionReport = {
+  mode: ScaleCorrectionMode;
+  estimatedScale: number;
+  appliedScale: number;
+  nccBefore: number;
+  /** 推定 scale の NCC。fallback しても消さない */
+  nccAtEstimate: number;
+  nccAfter: number;
+  fellBack: boolean;
+  minGain: number;
+  analysisLongSide: number;
+  ms: number;
+};
+
 export type FusionParams = {
   workLongSide: number;
   sharpWindowRadius: number;
@@ -51,6 +67,12 @@ export type FusionParams = {
   haloShrink: number;
   colorMatch: boolean;
   align: boolean;
+  /** 拡大率補正。既定は毎回推定 */
+  scaleMode: ScaleCorrectionMode;
+  /** scaleMode が fixed のとき FAR に掛ける倍率 */
+  scaleFixed: number;
+  /** 推定 NCC の改善がこれ未満なら scale=1。既定 0.001 */
+  scaleMinGain: number;
 };
 
 export type FusionTimings = {
@@ -99,6 +121,7 @@ export type FusionResult = {
   debug?: FusionDebugUris;
   maskDiagnostics?: MaskDiagnostics;
   psnrDb?: number;
+  scaleCorrection?: ScaleCorrectionReport;
 };
 
 export type SyntheticSession = {

@@ -1,3 +1,4 @@
+import { DISPLAY_BUFFER, displayNormalizedToBufferPixel, type PixelBufferSpace } from '@/imaging/displayPoint';
 import { laplacianVarianceAtPoint, laplacianVarianceInRect } from '@/perf/fusionDiagnosticsCore';
 import type { NormalizedPoint } from '@/types';
 
@@ -11,12 +12,14 @@ export function analysisPointCoords(
   point: NormalizedPoint,
   analysisWidth: number,
   analysisHeight: number,
+  space: PixelBufferSpace = DISPLAY_BUFFER,
 ): AnalysisPointCoords {
+  const mapped = displayNormalizedToBufferPixel(point, analysisWidth, analysisHeight, space);
   return {
     normalized: { x: point.x, y: point.y },
     pixelCenter: {
-      x: Math.floor(point.x * analysisWidth),
-      y: Math.floor(point.y * analysisHeight),
+      x: Math.min(analysisWidth - 1, Math.max(0, Math.floor(mapped.x))),
+      y: Math.min(analysisHeight - 1, Math.max(0, Math.floor(mapped.y))),
     },
     analysisSize: { width: analysisWidth, height: analysisHeight },
   };
@@ -49,6 +52,7 @@ export function varianceAtPoint(
   w: number,
   h: number,
   point: NormalizedPoint,
+  space: PixelBufferSpace = DISPLAY_BUFFER,
 ): number {
-  return laplacianVarianceAtPoint(gray, w, h, point);
+  return laplacianVarianceAtPoint(gray, w, h, point, undefined, space);
 }

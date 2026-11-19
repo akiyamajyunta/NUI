@@ -22,7 +22,7 @@ export default function IoTestScreen() {
     if (res.canceled || !res.assets[0]) return;
     const asset = res.assets[0];
     try {
-      const loaded = await loadImage(asset.uri, asset.exif?.Orientation);
+      const loaded = await loadImage(asset.uri);
       setUri(loaded.uri);
       setSize(`${loaded.width} x ${loaded.height} / ${loaded.orientation}`);
     } catch (e) {

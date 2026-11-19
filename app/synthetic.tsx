@@ -22,7 +22,7 @@ export default function SyntheticScreen() {
     setBusy(true);
     try {
       const refUri = pick.assets[0].uri;
-      const loaded = await loadImage(refUri, pick.assets[0].exif?.Orientation);
+      const loaded = await loadImage(refUri);
       const pair = await createSyntheticPair(loaded.image, { farDx: 7, farDy: -4, farBrightness: 0.92 });
       dispatch({ type: 'SET_SYNTHETIC', payload: { referenceUri: refUri } });
       dispatch({

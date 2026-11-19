@@ -5,15 +5,24 @@ import {
   type SkImage,
   type SkShader,
 } from '@shopify/react-native-skia';
-import type { FusionParams, FusionResult, MaskDiagnostics } from '@/types';
+import type { FusionParams, FusionResult, MaskDiagnostics, NormalizedPoint, ScaleCorrectionReport } from '@/types';
+import { DISPLAY_BUFFER, displayNormalizedToBufferNormalized } from '@/imaging/displayPoint';
 import { loadImage } from '@/imaging/loadImage';
-import { fitLongSide, resizeSkImage, imageShaderBilinear } from '@/imaging/downscale';
+import { resizeSkImage, imageShaderBilinear } from '@/imaging/downscale';
+import { fitLongSide } from '@/imaging/fitLongSide';
+import { fusionPixelSize } from '@/imaging/fusionOutputSize';
 import { encodeToCacheJpeg } from '@/imaging/saveImage';
 import { colorCorrectionFromMeans, IDENTITY_COLOR } from '@/imaging/colorStats';
 import { readRgbMeans, readGrayFromSkImage } from '@/imaging/imagePixels';
 import { computePsnr } from '@/perf/psnr';
-import { alignNearFar } from '@/fusion/align';
 import { buildSharpnessMap, blurSingleChannel, windowRadiusToSigma } from '@/fusion/sharpness';
+import {
+  boxBlurGray,
+  estimateAppliedScale,
+  SCALE_DIAG_BLUR_RADIUS_PX,
+  SCALE_ESTIMATE_LONG_SIDE,
+  SCALE_MIN_GAIN,
+} from '@/perf/alignScaleDiagnosticCore';
 import { effectiveThreshold, maskDiagnosticsFromEncoded } from '@/fusion/maskCore';
 import { MASK_FILL_SKSL, MASK_RAW_SKSL } from '@/fusion/shaders/mask';
 import { BLEND_SKSL } from '@/fusion/shaders/blend';
@@ -24,8 +33,6 @@ import {
   MASK_FILL_PRIOR,
   MASK_LOW_TEXTURE_HI,
   MASK_LOW_TEXTURE_LO,
-  ALIGN_MIN_CONFIDENCE,
-  MAX_TEXTURE_LONG_SIDE,
   SHARPNESS_LAP_MAX,
 } from '@/config/constants';
 import { logError } from '@/util/log';
@@ -38,6 +45,13 @@ export type FuseOptions = {
   saveDebug?: boolean;
   /** 診断: 全画素で NEAR または FAR のみを選択 */
   forceMask?: 'near' | 'far';
+  /** 表示向きの被写体点。拡大率の除外円に使う */
+  subjectPoint?: NormalizedPoint;
+  /**
+   * 撮影時の left/right など。画素の回転には使わない。
+   * Skia が EXIF を適用済みで、ここから角度を足すと二重回転になる。
+   */
+  orientation?: unknown;
 };
 
 function makeUniformMask(w: number, h: number, value: number): SkImage {
@@ -134,6 +148,7 @@ function blendImages(
   colorGain: [number, number, number],
   colorBias: [number, number, number],
   align: { dx: number; dy: number },
+  farScale: number,
 ): SkImage {
   const effect = Skia.RuntimeEffect.Make(BLEND_SKSL);
   if (!effect) throw new Error('blend SkSL compile failed');
@@ -145,6 +160,9 @@ function blendImages(
     [
       align.dx,
       align.dy,
+      farScale,
+      w / 2,
+      h / 2,
       mw / w,
       mh / h,
       colorGain[0],
@@ -201,8 +219,7 @@ export async function fuse(
   let outW = nearLoaded.width;
   let outH = nearLoaded.height;
 
-  const maxLong = outputLongSide ?? Math.max(outW, outH);
-  const capped = fitLongSide(outW, outH, Math.min(maxLong, MAX_TEXTURE_LONG_SIDE));
+  const capped = fusionPixelSize(outW, outH, outputLongSide);
   if (capped.width !== outW || capped.height !== outH) {
     nearImg = resizeSkImage(nearImg, capped.width, capped.height);
     farImg = resizeSkImage(farImg, capped.width, capped.height);
@@ -210,24 +227,50 @@ export async function fuse(
     outH = capped.height;
   }
 
-  let alignOffset = { dx: 0, dy: 0 };
-  let alignEstimatedOffset = { dx: 0, dy: 0 };
-  let alignOffsetApplied = false;
-  let alignConfidence = 1;
-  let alignWarning = false;
-  if (params.align) {
-    onProgress?.('位置合わせ');
-    const tAlign = performance.now();
-    const ar = await alignNearFar(nearImg, farImg);
-    alignMs = performance.now() - tAlign;
-    alignEstimatedOffset = { dx: ar.dx, dy: ar.dy };
-    alignConfidence = ar.confidence;
-    alignWarning = ar.warned;
-    if (ar.confidence >= ALIGN_MIN_CONFIDENCE) {
-      alignOffset = alignEstimatedOffset;
-      alignOffsetApplied = true;
-    }
+  const alignOffset = { dx: 0, dy: 0 };
+  const alignEstimatedOffset = { dx: 0, dy: 0 };
+  const alignOffsetApplied = false;
+  const alignConfidence = 1;
+  const alignWarning = false;
+  let scaleCorrection: ScaleCorrectionReport = {
+    mode: params.scaleMode ?? 'estimate',
+    estimatedScale: 1,
+    appliedScale: 1,
+    nccBefore: 0,
+    nccAtEstimate: 0,
+    nccAfter: 0,
+    fellBack: false,
+    minGain: params.scaleMinGain ?? SCALE_MIN_GAIN,
+    analysisLongSide: SCALE_ESTIMATE_LONG_SIDE,
+    ms: 0,
+  };
+  if (scaleCorrection.mode !== 'off') {
+    onProgress?.('拡大率');
+    const { width: aw, height: ah } = fitLongSide(outW, outH, SCALE_ESTIMATE_LONG_SIDE);
+    let grayNear = readGrayFromSkImage(nearImg, SCALE_ESTIMATE_LONG_SIDE);
+    let grayFar = readGrayFromSkImage(farImg, SCALE_ESTIMATE_LONG_SIDE);
+    grayNear = boxBlurGray(grayNear, aw, ah, SCALE_DIAG_BLUR_RADIUS_PX);
+    grayFar = boxBlurGray(grayFar, aw, ah, SCALE_DIAG_BLUR_RADIUS_PX);
+    const subject = displayNormalizedToBufferNormalized(
+      options?.subjectPoint ?? { x: 0.5, y: 0.45 },
+      aw,
+      ah,
+      DISPLAY_BUFFER,
+    );
+    const est = estimateAppliedScale(
+      grayNear,
+      grayFar,
+      aw,
+      ah,
+      subject,
+      scaleCorrection.mode,
+      params.scaleFixed ?? 1,
+      params.scaleMinGain ?? SCALE_MIN_GAIN,
+    );
+    scaleCorrection = { mode: scaleCorrection.mode, ...est };
+    alignMs = est.ms;
   }
+  const farScale = scaleCorrection.appliedScale;
 
   const work = fitLongSide(outW, outH, params.workLongSide);
   const nearWork = resizeSkImage(nearImg, work.width, work.height);
@@ -272,11 +315,24 @@ export async function fuse(
   const tBlend = performance.now();
   let resultImage: SkImage;
   try {
-    resultImage = blendImages(nearImg, farImg, mask, params, color.gain, color.bias, alignOffset);
+    resultImage = blendImages(
+      nearImg,
+      farImg,
+      mask,
+      params,
+      color.gain,
+      color.bias,
+      alignOffset,
+      farScale,
+    );
   } catch (e) {
     logError('fusion', 'blend failed', e);
     throw new Error('合成に失敗しました');
   }
+  // 入力は MakeImageFromEncoded が表示向きにした画素。ここでは回さない。
+  void options?.orientation;
+  outW = resultImage.width();
+  outH = resultImage.height();
   blendMs = performance.now() - tBlend;
 
   onProgress?.('エンコード');
@@ -330,5 +386,6 @@ export async function fuse(
     debug,
     maskDiagnostics,
     psnrDb,
+    scaleCorrection,
   };
 }

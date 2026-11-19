@@ -5,21 +5,9 @@ import {
   TileMode,
   type SkImage,
 } from '@shopify/react-native-skia';
+import { fitLongSide } from '@/imaging/fitLongSide';
 
-/** 長辺を targetLongSide に合わせた出力サイズ */
-export function fitLongSide(
-  width: number,
-  height: number,
-  targetLongSide: number,
-): { width: number; height: number } {
-  const long = Math.max(width, height);
-  if (long <= targetLongSide) return { width, height };
-  const scale = targetLongSide / long;
-  return {
-    width: Math.max(1, Math.round(width * scale)),
-    height: Math.max(1, Math.round(height * scale)),
-  };
-}
+export { fitLongSide };
 
 export function resizeSkImage(source: SkImage, targetW: number, targetH: number): SkImage {
   const surface = Skia.Surface.MakeOffscreen(targetW, targetH);

@@ -7,6 +7,7 @@ import type {
   HoldBackgroundFocusSessionStats,
   MaskDiagnostics,
   RangeStats,
+  ScaleCorrectionReport,
 } from '@/types';
 import type {
   DiagnosticPointLayout,
@@ -108,8 +109,10 @@ export type DiagnosticReportData = {
     performanceNote?: string;
     subpixelNote?: string;
   };
-  /** 背景エッジの粗い拡大率探索（診断のみ・合成には未適用） */
+  /** 同時探索を設定で有効にしたときだけ入る */
   alignScaleProbe: AlignScaleDiagnostic | null;
+  /** 合成に適用した拡大率と、適用前後の NCC */
+  scaleCorrection: ScaleCorrectionReport | null;
   focusABeforeShot: FocusABeforeShotReport | null;
   holdBackgroundFocus: HoldBackgroundFocusSessionStats | null;
   quality: FusionQualityTable | null;
@@ -168,6 +171,7 @@ export function diagnosticReportJson(data: DiagnosticReportData): Record<string,
     focusPoints: data.pointLayout,
     align: data.align,
     alignScaleProbe: data.alignScaleProbe,
+    scaleCorrection: data.scaleCorrection,
     focusABeforeShot: data.focusABeforeShot,
     holdBackgroundFocus: data.holdBackgroundFocus,
     qualityLaplacianVariance: data.quality,
@@ -264,18 +268,24 @@ export function formatDiagnosticReportText(data: DiagnosticReportData): string {
   lines.push(`警告: ${data.align.warning ? 'あり' : 'なし'}`);
   if (data.align.performanceNote) lines.push(`調査: ${data.align.performanceNote}`);
   if (data.align.subpixelNote) lines.push(`粗さ: ${data.align.subpixelNote}`);
-  if (data.alignScaleProbe) {
-    const s = data.alignScaleProbe;
+  if (data.scaleCorrection) {
+    const s = data.scaleCorrection;
     lines.push('');
-    lines.push('【拡大率探索（診断のみ）】');
+    lines.push('【拡大率補正】');
     lines.push(
-      `  背景マスク付きエッジSAD最小 scale≈${s.bestScale.toFixed(3)}（SAD ${s.bestMaskedSad.toFixed(5)} / 1.0時 ${s.atUnityMaskedSad.toFixed(5)}）`,
+      `  mode=${s.mode} 推定=${s.estimatedScale.toFixed(3)} 適用=${s.appliedScale.toFixed(3)} fallback=${s.fellBack ? 'あり' : 'なし'} しきい値=${s.minGain.toFixed(4)} 長辺=${s.analysisLongSide}px`,
     );
     lines.push(
-      `  探索 ${s.searchMin}〜${s.searchMax} step ${s.step} / 長辺 ${s.analysisLongSide}px / 被写体除外半径 ${(s.excludeSubjectRadiusFrac * 100).toFixed(0)}%幅`,
+      `  補正前NCC=${s.nccBefore.toFixed(4)} 推定scaleのNCC=${s.nccAtEstimate.toFixed(4)} 適用後NCC=${s.nccAfter.toFixed(4)} / ${Math.round(s.ms)} ms`,
     );
+  }
+  const joint = data.alignScaleProbe?.joint;
+  if (joint) {
+    const j = joint;
+    lines.push('');
+    lines.push('【拡大率×平行移動（診断のみ・設定で有効）】');
     lines.push(
-      `  固定平行移動（分析px） dx ${s.fixedTranslation.dx} dy ${s.fixedTranslation.dy} / ${Math.round(s.ms)} ms`,
+      `  scale=${j.bestScale.toFixed(3)} dx=${j.bestDx}px dy=${j.bestDy}px NCC=${j.bestNcc.toFixed(4)} 差=${j.nccGainVsUnity >= 0 ? '+' : ''}${j.nccGainVsUnity.toFixed(4)} / ${Math.round(j.ms)} ms`,
     );
   }
   lines.push('');
@@ -312,7 +322,13 @@ export function formatDiagnosticReportText(data: DiagnosticReportData): string {
   lines.push('【マスク分布】');
   if (data.mask) {
     lines.push(`  FAR寄り (<0.1): ${pct(data.mask.below01 * 100)}`);
-    lines.push(`  混合 (0.1〜0.9): ${pct(data.mask.mid * 100)}`);
+    lines.push(`  混合 (0.1〜0.9) 全体: ${pct(data.mask.mid * 100)}`);
+    if (data.mask.midAtSubject != null) {
+      lines.push(`  混合 被写体周辺: ${pct(data.mask.midAtSubject * 100)}`);
+    }
+    if (data.mask.midAtBackground != null) {
+      lines.push(`  混合 背景周辺: ${pct(data.mask.midAtBackground * 100)}`);
+    }
     lines.push(`  NEAR寄り (>0.9): ${pct(data.mask.above09 * 100)}`);
     lines.push(`  ピクセル数: ${data.mask.sampleCount}`);
   } else {

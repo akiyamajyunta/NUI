@@ -1,4 +1,5 @@
 import { FOCUS_VERIFY_K } from '@/config/constants';
+import { DISPLAY_BUFFER, type PixelBufferSpace } from '@/imaging/displayPoint';
 import { laplacianVarianceAtPoint, SHARPNESS_REGION_FRAC } from '@/perf/fusionDiagnosticsCore';
 import type { NormalizedPoint } from '@/types';
 
@@ -18,15 +19,16 @@ export function focusSharpnessTableFromGray(
   nearPoint: NormalizedPoint,
   farPoint: NormalizedPoint,
   regionFrac = SHARPNESS_REGION_FRAC,
+  space: PixelBufferSpace = DISPLAY_BUFFER,
 ): FocusSharpnessTable {
   return {
     atSubjectPoint: {
-      near: laplacianVarianceAtPoint(nearGray, w, h, nearPoint, regionFrac),
-      far: laplacianVarianceAtPoint(farGray, w, h, nearPoint, regionFrac),
+      near: laplacianVarianceAtPoint(nearGray, w, h, nearPoint, regionFrac, space),
+      far: laplacianVarianceAtPoint(farGray, w, h, nearPoint, regionFrac, space),
     },
     atBackgroundPoint: {
-      near: laplacianVarianceAtPoint(nearGray, w, h, farPoint, regionFrac),
-      far: laplacianVarianceAtPoint(farGray, w, h, farPoint, regionFrac),
+      near: laplacianVarianceAtPoint(nearGray, w, h, farPoint, regionFrac, space),
+      far: laplacianVarianceAtPoint(farGray, w, h, farPoint, regionFrac, space),
     },
   };
 }
@@ -51,7 +53,17 @@ export function verifyFocusFromGray(
   nearPoint: NormalizedPoint,
   farPoint: NormalizedPoint,
   k = FOCUS_VERIFY_K,
+  space: PixelBufferSpace = DISPLAY_BUFFER,
 ): FocusVerifyResult {
-  const table = focusSharpnessTableFromGray(nearGray, farGray, w, h, nearPoint, farPoint);
+  const table = focusSharpnessTableFromGray(
+    nearGray,
+    farGray,
+    w,
+    h,
+    nearPoint,
+    farPoint,
+    undefined,
+    space,
+  );
   return verifyFocusFromSharpnessTable(table, k);
 }

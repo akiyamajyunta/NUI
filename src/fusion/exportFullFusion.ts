@@ -1,5 +1,5 @@
 import { fuse, type FuseOptions } from '@/fusion/fuse';
-import type { FusionParams } from '@/types';
+import type { FusionParams, NormalizedPoint } from '@/types';
 import { encodeToCacheJpeg, saveImageToGallery, shareCacheFile } from '@/imaging/saveImage';
 import { loadImage } from '@/imaging/loadImage';
 
@@ -11,6 +11,8 @@ export type ExportFusionOpts = {
   referenceUriForPsnr?: string;
   forceMask?: 'near' | 'far';
   onProgress?: (stage: string) => void;
+  subjectPoint?: NormalizedPoint;
+  orientation?: unknown;
 };
 
 /** 保存ボタンと同じ：フル解像度で fuse → 再読込 → JPEG エンコード */
@@ -20,6 +22,8 @@ export async function exportFullFusionToCache(opts: ExportFusionOpts): Promise<s
     referenceUriForPsnr: opts.referenceUriForPsnr,
     forceMask: opts.forceMask,
     saveDebug: false,
+    subjectPoint: opts.subjectPoint,
+    orientation: opts.orientation,
   });
   const loaded = await loadImage(full.imageUri);
   return encodeToCacheJpeg(loaded.image, opts.forceMask ? `passthrough-${opts.forceMask}` : 'export');
